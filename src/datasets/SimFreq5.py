@@ -18,7 +18,7 @@ from torch_timeseries.core import TimeSeriesDataset, BaseIrrelevant, BaseRelevan
 
 class SimFreq5(TimeSeriesDataset):
     name: str = 'SimFreq5'
-    num_features:int = 5
+    num_features:int = 3
     sample_rate:int = 1
     length : int= 10000
     freq: str = 't'
@@ -38,7 +38,8 @@ class SimFreq5(TimeSeriesDataset):
         # freqs_mag = ([(0,1,2,4),(1,3,5,6),(3,4,6,8),(1,2,4,5)])
         # freqs = (12,24,48,72)
         
-        freqs_mag = ([(0,1,2,4),(1,3,5,6),(3,4,6,8),(1,2,4,5),(1,3,5,6)])
+        # freqs_mag = ([(0,1,2,4),(1,3,5,6),(3,4,6,8),(1,2,4,5),(1,3,5,6)])
+        freqs_mag = ([(0,1,2,4),(1,3,5,6),(3,4,6,8)])
         freqs = (12,24,48,72,96)
 
         

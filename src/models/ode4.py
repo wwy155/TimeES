@@ -3,19 +3,20 @@ import torch.nn as nn
 import torch.fft as fft
 from torchdiffeq import odeint
 # from torchdiffeq import odeint_adjoint as odeint
+import matplotlib.pyplot as plt
 
 class SpectrumTrajectoryEncoder(nn.Module):
-    def __init__(self, freq_dim, hidden_dim):
+    def __init__(self, inp_dim, freq_dim, hidden_dim):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(freq_dim, hidden_dim),
+            nn.Linear(freq_dim+inp_dim, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-    def forward(self, A):  # A: [B, 1, K]
-        x = A.squeeze(1)  # [B, K]
-        return self.net(x)  # [B, D]
+    def forward(self, A, x):  # A: [B, 1, K]
+        inp = torch.concat([A, x], dim=-1)
+        return self.net(inp)  # [B, D]
 
 class SpectralODEFunc(nn.Module):
     def __init__(self, hidden_dim):
@@ -32,25 +33,6 @@ class SpectralODEFunc(nn.Module):
         input = torch.cat([h, t_expand], dim=-1)
         return self.net(input)
 
-# class SpectralDecoder(nn.Module):
-#     def __init__(self, hidden_dim, freq_dim):
-#         super().__init__()
-#         self.decoder = nn.Sequential(
-#             nn.Linear(hidden_dim + 1, hidden_dim),
-#             nn.ReLU(),
-#             nn.Linear(hidden_dim, 2)
-#         )
-
-#     def forward(self, h_t, omega):
-#         # h_t: [B, H, D], omega: [K]
-#         B, H, D = h_t.shape
-#         K = omega.shape[0]
-#         omega = omega.view(1, 1, K).expand(B, H, K)  # [B, H, K]
-#         h_t_expand = h_t.unsqueeze(2).expand(B, H, K, D)  # [B, H, K, D]
-#         input = torch.cat([h_t_expand, omega.unsqueeze(-1)], dim=-1)  # [B, H, K, D+1]
-#         out = self.decoder(input.view(B * H * K, -1))  # [B*H*K, 2]
-#         return out.view(B, H, K, 2)  # [B, H, K, 2]
-
 class SpectralDecoder(nn.Module):
     def __init__(self, hidden_dim, freq_dim):
         super().__init__()
@@ -60,8 +42,8 @@ class SpectralDecoder(nn.Module):
             nn.Linear(hidden_dim, freq_dim)
         )
 
-    def forward(self, h_t, omega):
-        # h_t: [B, H, D], omega: [K]
+    def forward(self, h_t):
+        # h_t: [B, H, D]
         
         B, H, D = h_t.shape
         out = self.decoder(h_t)  # [B*H*K, 2]
@@ -69,19 +51,29 @@ class SpectralDecoder(nn.Module):
 
 
 class NeuralSpectralForecaster(nn.Module):
-    def __init__(self, input_len, freq_dim, hidden_dim, freqs, use_norm=True):
+    def __init__(self, input_len, freq_dim, fft_length, hidden_dim, step_size=0.1, use_norm=True):
         super().__init__()
         self.use_norm = use_norm
-        self.encoder = SpectrumTrajectoryEncoder(freq_dim, hidden_dim)
-        self.ode_func = SpectralODEFunc(hidden_dim)
-        self.decoder = SpectralDecoder(hidden_dim, freq_dim)
-        self.freqs = freqs
 
-    def forward(self, A_obs, ts_future):
-        
-        h0 = self.encoder(A_obs)  # [B, D]
-        h_future = odeint(self.ode_func, h0, ts_future, method='euler', options=dict(step_size=0.1)).permute(1, 0, 2)  # [B, H, D]
-        A_pred = self.decoder(h_future, self.freqs)  # [B, H, K, 2]
+        self.fft_length = fft_length
+        self.nf = 1 + (input_len - self.fft_length) // self.fft_length
+
+        self.encoder = SpectrumTrajectoryEncoder(self.nf*freq_dim, freq_dim, hidden_dim)
+        self.ode_func = SpectralODEFunc(hidden_dim)
+        self.step_size = step_size
+        self.hidden_dim = hidden_dim
+        self.decoder = SpectralDecoder(hidden_dim, freq_dim)
+
+    def forward(self, x, xf, A_obs, ts):
+        # x: original values [B, N, T]
+        # xf: original values [B, N, F]
+        # A_obs: fourier spectrum [B, N, fft_length]
+        # ts: [t[0](init time), ...] len = fs_O + 1
+        xf = xf.reshape(x.shape[0], x.shape[1], -1)
+        h0 = self.encoder(A_obs, xf)  # [B, N, D]
+        h0 = h0.reshape(-1, self.hidden_dim)
+        h_future = odeint(self.ode_func, h0, ts, method='euler', options=dict(step_size=self.step_size)).permute(1, 0, 2)  # [B, fs_O, D]
+        A_pred = self.decoder(h_future)  # [B, H, K, 2]
         return A_pred
 
 def compute_stft_spectrum(x, n_fft):
@@ -100,7 +92,6 @@ def compute_stft_spectrum(x, n_fft):
     
     return stft_out.permute(0, 2, 1, 3).reshape(B, 1 + (L - n_fft) // hop_length, (n_fft//2+1)*2)  # [B, num of freq_spectrum, K//2*2+2]
 
-import matplotlib.pyplot as plt
 
 # === Example Run ===
 if __name__ == '__main__':
