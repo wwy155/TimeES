@@ -23,7 +23,7 @@ from torch_timeseries.utils.early_stop import EarlyStopping
 from torch_timeseries.utils.parse_type import parse_type
 from torch_timeseries.utils.reproduce import reproducible
 from torch_timeseries.core import TimeSeriesDataset, BaseIrrelevant, BaseRelevant
-from torch_timeseries.dataloader import SlidingWindowTS, ETTHLoader, ETTMLoader
+from torch_timeseries.dataloader import SlidingWindowTS, SlidingWindowTimeIndex, ETTHLoader, ETTMLoader
 from torch_timeseries.utils import asdict_exc
 
 try:
