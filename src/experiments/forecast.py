@@ -1,5 +1,5 @@
 # import codecs
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import datetime
 import hashlib
 import json
@@ -7,6 +7,7 @@ import os
 import random
 import time
 from typing import Dict, List, Type, Union
+import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
@@ -15,6 +16,7 @@ from torchmetrics import MeanAbsoluteError, MeanSquaredError, MetricCollection
 from tqdm import tqdm
 from torch.nn import MSELoss, L1Loss
 from torch.optim import *
+from torch_timeseries.dataloader.wrapper import MultiStepTimeFeatureSet, MultivariateFast
 from torch_timeseries.dataset import *
 from torch_timeseries.scaler import *
 from src.datasets import *
@@ -41,6 +43,7 @@ class ForecastSettings:
 @dataclass
 class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
     loss_func_type : str = 'mse'
+    columns : List[int] = field(default_factory=lambda : [])
     
     def config_wandb(
         self,
@@ -133,9 +136,8 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
 
     def _init_dataset(self):
         self.dataset: TimeSeriesDataset = parse_type(self.dataset_type, globals())(
-            root=self.data_path
+            root=self.data_path, columns=self.columns
         )
-
     
     def _init_data_loader(self):
         
@@ -488,3 +490,79 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
 
         torch.save(self.run_state, f"{self.run_checkpoint_filepath}")
         print("Run state saved ... ")
+
+
+
+
+    def plot(self):
+        
+        full_dataset = MultiStepTimeFeatureSet(
+            self.dataset,
+            scaler=self.scaler,
+            time_enc=3,
+            window=self.windows,
+            horizon=self.horizon,
+            steps=self.pred_len,
+            freq=self.dataset.freq,
+            single_variate=False,
+            scaler_fit=False,
+            time_index=True,
+        )
+
+        all_batch_x = []
+        all_batch_x_date_enc = []
+        all_batch_y_date_enc = []
+        all_batch_y = []
+        
+        all_x_index = []
+        all_y_index = []
+        
+
+        for i in range(0, len(full_dataset), self.pred_len) :
+            batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index = full_dataset[i]
+            all_batch_x.append(torch.tensor(batch_x))
+            all_batch_y.append(torch.tensor(batch_y))
+            all_batch_x_date_enc.append(torch.tensor(batch_x_date_enc))
+            all_batch_y_date_enc.append(torch.tensor(batch_y_date_enc))
+            
+            all_x_index.append(torch.tensor(x_index))
+            all_y_index.append(torch.tensor(y_index))
+            
+        all_batch_x = torch.stack(all_batch_x, dim=0).to(self.device).float() 
+        all_batch_y = torch.stack(all_batch_y, dim=0).to(self.device).float() 
+        all_x_date_enc = torch.stack(all_batch_x_date_enc, dim=0).to(self.device).float() 
+        all_y_date_enc = torch.stack(all_batch_y_date_enc, dim=0).to(self.device).float()
+        all_x_index = torch.stack(all_x_index, dim=0).to(self.device).float()
+        all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
+        # outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
+        
+        outs, _ = self._process_one_batch(
+            all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc
+        )
+
+        # fig, axes = plt.subplots(all_batch_x.shape[2])
+        # for i in range(all_batch_x.shape[2]):
+        #     out = outs[:, :, i]
+        #     pred_all = out.reshape(-1).detach().cpu().numpy()
+        #     y_all = all_batch_y[:, :, i].reshape(-1).detach().cpu().numpy()
+        #     axes[i].plot(pred_all, label='pred')
+        #     axes[i].plot(y_all, label='y')
+            
+        # plt.legend()
+        # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
+
+        # instance
+        last_n = 9
+        n = min(all_batch_x.shape[2], 10)
+        fig, axes = plt.subplots(n)
+        for i in range(n):
+            out = outs[-last_n:, :, i]
+            pred_all = out.reshape(-1).detach().cpu().numpy()
+            y_all = all_batch_y[-last_n:, :, i].reshape(-1).detach().cpu().numpy()
+            axes[i].plot(pred_all, label='pred')
+            axes[i].plot(y_all, label='y')
+            
+        plt.legend()
+        plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
+
+

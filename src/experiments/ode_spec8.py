@@ -5,7 +5,7 @@ import os
 import time
 import torch
 from tqdm import tqdm
-from src.models.ode7 import NeuralSpectralForecaster
+from src.models.ode8 import NeuralSpectralForecaster
 from src.experiments.forecast import ForecastExp
 from torch_timeseries.nn.embedding import freq_map
 from torch_timeseries.dataloader.wrapper import MultiStepTimeFeatureSet, MultivariateFast
@@ -33,7 +33,7 @@ class WFParameters:
 
 @dataclass
 class ODESpecExp(ForecastExp, WFParameters):
-    model_type: str = "ODESpecExp7"
+    model_type: str = "ODESpecExp8"
 
     def _init_model(self):
         self.time_feature_size = freq_map[self.dataset.freq]
@@ -45,9 +45,12 @@ class ODESpecExp(ForecastExp, WFParameters):
         # self.infer_spec_num = math.ceil(  )
         # self.inp_spec_num = 1 + self.windows // self.hop_length
         # self.total_spec_num = math.ceil((self.windows+self.pred_len) / self.hop_length)
+        self.ts = ( torch.arange(0, self.train_spec_num+1)*self.recon_step ).float().to(self.device)
         
         self.freqs = torch.linspace(0, self.freq_dim-1, self.freq_dim).to(self.device) 
         self.model = NeuralSpectralForecaster(
+            fs=len(self.ts),
+            out_fftlen=(self.pred_len//2 + 1),
             c_dim=self.dataset.num_features,
             c_emb_dim=self.c_emb_dim,
             fft_length=self.fft_length,
@@ -65,7 +68,6 @@ class ODESpecExp(ForecastExp, WFParameters):
         # self.ts_future = ( torch.arange(1, self.total_spec_num-1)*self.recon_step ).float().to(self.device) 
         
         # set to number of frequencies spectrum + 1, t[0] is the initial time
-        self.ts = ( torch.arange(0, self.train_spec_num+1)*self.recon_step ).float().to(self.device)
         
         # self.pred_future = ( torch.arange(1, self.total_spec_num-1 - self.inp_spec_num) ).float().to(self.device) 
       
@@ -228,17 +230,12 @@ class ODESpecExp(ForecastExp, WFParameters):
         # stft_spec_out = self.compute_stft_spectrum(batch_y.transpose(1, 2)) #  # [B, N, num of freq_spectrum, self.fft_length//2*2+2]
 
         A_obs = stft_spec[:, :, 0, :]  # [B, N, K//2+1] use all spectrum to train
-        A_pred = self.model(A_obs , self.ts.to(self.device))   # B, N, fs_O, F
+        A_pred = self.model(A_obs , self.ts.to(self.device))   # B, N, of
         
         # get the prediction
-        A_pred = A_pred[:, :, 1:, :]  # B, N, fs_O, F
-        A_pred = A_pred.reshape(A_pred.shape[0], A_pred.shape[1], A_pred.shape[2], -1) # B, N, fs_O, F
-        pred_values = torch.fft.irfft(A_pred, dim=-1, norm="backward") # B, N, fs_O, fft_length
-        pred_values = pred_values[:, :, :, -self.hop_length:]  # [B, N, fs_O, hop_length]
-        pred_values = pred_values.reshape(B, N, -1)[:, :, :self.pred_len].permute(0, 2, 1)
-        # pred_values = pred_values.reshape(B, N, -1)  # [B, N, fs_O * hop_length]
+        pred_values = torch.fft.irfft(A_pred, dim=-1, norm="backward") # B, N, O
+        return pred_values.permute(0, 2, 1)
 
-        return pred_values
 
 
 
@@ -287,12 +284,8 @@ class ODESpecExp(ForecastExp, WFParameters):
         
         if self.train_time_domain:
             # get the prediction
-            A_pred = A_pred[:, :, 1:, :]  # B, N, fs_O, F
-            A_pred = A_pred.reshape(A_pred.shape[0], A_pred.shape[1], A_pred.shape[2], -1) # B, N, fs_O, F
             pred_values = torch.fft.irfft(A_pred, dim=-1, norm="backward") # B, N, fs_O, fft_length
-            pred_values = pred_values[:, :, :, -self.hop_length:]  # [B, N, fs_O, hop_length]
-            pred_values = pred_values.reshape(B, N, -1)[:, :, :self.pred_len].permute(0, 2, 1)
-            return pred_values, batch_y
+            return pred_values.permute(0, 2, 1), batch_y
         
 
         # import pdb;pdb.set_trace()
@@ -360,23 +353,20 @@ class ODESpecExp(ForecastExp, WFParameters):
         all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
         outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
         
-        
-        n = min(all_batch_x.shape[2], 10)
-        
-        
-        fig, axes = plt.subplots(n)
-        for i in range(n):
-            out = outs[:, :, i]
-            pred_all = out.reshape(-1).detach().cpu().numpy()
-            y_all = all_batch_y[:, :, i].reshape(-1).detach().cpu().numpy()
-            axes[i].plot(pred_all, label='pred')
-            axes[i].plot(y_all, label='y')
+        # fig, axes = plt.subplots(all_batch_x.shape[2])
+        # for i in range(all_batch_x.shape[2]):
+        #     out = outs[:, :, i]
+        #     pred_all = out.reshape(-1).detach().cpu().numpy()
+        #     y_all = all_batch_y[:, :, i].reshape(-1).detach().cpu().numpy()
+        #     axes[i].plot(pred_all, label='pred')
+        #     axes[i].plot(y_all, label='y')
             
-        plt.legend()
-        plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
+        # plt.legend()
+        # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
 
         # instance
         last_n = 9
+        n = min(all_batch_x.shape[2], 10)
         fig, axes = plt.subplots(n)
         for i in range(n):
             out = outs[-last_n:, :, i]

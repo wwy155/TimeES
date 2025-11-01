@@ -92,13 +92,19 @@ class SpectralDecoder(nn.Module):
 
 
 class NeuralSpectralForecaster(nn.Module):
-    def __init__(self, input_len, c_dim, c_emb_dim, freq_dim, fft_length, hidden_dim, time_dim, step_size=0.1, use_norm=True):
+    def __init__(self, fs, out_fftlen, input_len, c_dim, c_emb_dim, freq_dim, fft_length, hidden_dim, time_dim, step_size=0.1, use_norm=True):
+        # fs: numer of  frequency spectrum
         super().__init__()
         self.use_norm = use_norm
         self.freq_dim = freq_dim
         self.time_dim = time_dim
         self.fft_length = fft_length
-        self.nf = 1 + (input_len - self.fft_length) // self.fft_length
+        
+        self.out_fftlen = out_fftlen
+        self.fs = fs
+        
+        
+        # self.nf = 1 + (input_len - self.fft_length) // self.fft_length
         
         
 
@@ -107,14 +113,20 @@ class NeuralSpectralForecaster(nn.Module):
         self.step_size = step_size
         self.hidden_dim = hidden_dim
         
+        
+        self.projection = nn.Linear(fs*self.freq_dim, self.out_fftlen).to(torch.cfloat)
+        
+        
+        # self.l2 = nn.Linear(hidden_dim, inp_dim).to(torch.cfloat)
+
         # self.flatten_head = nn.Sequential(
-        #         nn.Linear(inp_dim*self.nf, hidden_dim),
+        #         nn.Linear(ifs*self.freq_dim, hidden_dim),
         #         nn.ReLU(),
         #         # nn.Linear(hidden_dim, hidden_dim),
         #         # nn.ReLU(),
         #         # nn.Linear(hidden_dim, hidden_dim),
         #         # nn.ReLU(),
-        #         nn.Linear(hidden_dim, inp_dim)
+        #         nn.Linear(ofs*, inp_dim)
         # )
         # self.decoder = SpectralDecoder(hidden_dim, freq_dim)
 
@@ -125,12 +137,15 @@ class NeuralSpectralForecaster(nn.Module):
         # ts: [t[0](init time), ...] len = fs_O + 1
         
         
+        
         B, N, F = h0.shape
         h0 = h0.reshape(-1, self.freq_dim) # B*N, fim
         
         h_future = odeint(self.ode_func, h0, ts, method='euler', options=dict(step_size=self.step_size)).permute(1, 0, 2)  # [B*N, fs_O, f_dim]
         
-        h_future = h_future.reshape(B, N, h_future.shape[-2], h_future.shape[-1])
+        h_future = h_future.reshape(B, N, h_future.shape[-2]*h_future.shape[-1])
+        
+        h_future = self.projection(h_future) # B, N, Of
         
         # output = self.flatten_head(h_future) # B, N, F
         
