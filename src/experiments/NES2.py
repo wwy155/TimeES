@@ -34,24 +34,25 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes1 import NeuralEvolutionrySpectra
+from src.models.nes2 import NeuralEvolutionrySpectra
 
 
 @dataclass
 class NESParameters:
     nw: int = 1024
     hidden_dim : int = 512
-    single_head : bool = True
-
+    act : str = 'relu'
+    max_w : float = 0.7
 @dataclass
-class NES1Forecast(ForecastExp, NESParameters):
-    model_type: str = "NES1"
+class NES2Forecast(ForecastExp, NESParameters):
+    model_type: str = "NES2"
 
     def _init_model(self):
         self.model = NeuralEvolutionrySpectra(
             hidden_dim=self.hidden_dim,
             number_of_w=self.nw,
-            single_head=self.single_head
+            act=self.act,
+            max_w=self.max_w,
         )
         self.model = self.model.to(self.device)
 
@@ -135,7 +136,7 @@ class NES1Forecast(ForecastExp, NESParameters):
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                     time_index=True,
-                    fast_train=True,
+                    fast_train=False,
                     fast_test=True,
                     fast_val=True,
 
@@ -152,7 +153,7 @@ class NES1Forecast(ForecastExp, NESParameters):
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                     time_index=True,
-                    fast_train=True,
+                    fast_train=False,
                     fast_test=True,
                     fast_val=True,
             )
@@ -172,7 +173,7 @@ class NES1Forecast(ForecastExp, NESParameters):
                 num_worker=self.num_worker,
                 time_enc=0,
                 time_index=True,
-                fast_train=True,
+                fast_train=False,
                 fast_test=True,
                 fast_val=True,
             )
@@ -312,7 +313,7 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 
     def _test(self):
-        super(NES1Forecast, self)._test()
+        super(NES2Forecast, self)._test()
         self.plot()
 
 
@@ -320,4 +321,4 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 if __name__ == "__main__":
     import fire
-    fire.Fire(NES1Forecast)
+    fire.Fire(NES2Forecast)

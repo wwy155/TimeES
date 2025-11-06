@@ -34,24 +34,22 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes1 import NeuralEvolutionrySpectra
+from src.models.nes4 import NeuralEvolutionarySpectra
 
 
 @dataclass
 class NESParameters:
-    nw: int = 1024
     hidden_dim : int = 512
-    single_head : bool = True
 
 @dataclass
-class NES1Forecast(ForecastExp, NESParameters):
-    model_type: str = "NES1"
+class NESForecast(ForecastExp, NESParameters):
+    model_type: str = "NES4"
 
     def _init_model(self):
-        self.model = NeuralEvolutionrySpectra(
+        self.model = NeuralEvolutionarySpectra(
+            input_len=self.windows,
+            pred_len=self.pred_len,
             hidden_dim=self.hidden_dim,
-            number_of_w=self.nw,
-            single_head=self.single_head
         )
         self.model = self.model.to(self.device)
 
@@ -67,13 +65,14 @@ class NES1Forecast(ForecastExp, NESParameters):
         batch_y = batch_y.to(self.device, dtype=torch.float32)
         batch_x_date_enc = batch_x_date_enc.to(self.device).float()
         batch_y_date_enc = batch_y_date_enc.to(self.device).float()
-        x_index = x_index.to(self.device).float().squeeze(-1) 
-        y_index = y_index.to(self.device).float().squeeze(-1) 
-        inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
-        inp = inp.unsqueeze(-1)
-        results = self.model(inp)
-        out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
-        return results, out_true
+        # x_index = x_index.to(self.device).float().squeeze(-1) 
+        # y_index = y_index.to(self.device).float().squeeze(-1) 
+        # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
+        # inp = inp.unsqueeze(-1)
+        batch_x = batch_x.squeeze(-1)
+        results = self.model(batch_x) # [H]
+        # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
+        return results, batch_y.squeeze(2)
 
     def _train(self):
         with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
@@ -135,9 +134,9 @@ class NES1Forecast(ForecastExp, NESParameters):
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                     time_index=True,
-                    fast_train=True,
-                    fast_test=True,
-                    fast_val=True,
+                    fast_train=False,
+                    fast_test=False,
+                    fast_val=False,
 
                 )
             elif  self.dataset_type[0:4] == "ETTm":
@@ -152,9 +151,9 @@ class NES1Forecast(ForecastExp, NESParameters):
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                     time_index=True,
-                    fast_train=True,
-                    fast_test=True,
-                    fast_val=True,
+                    fast_train=False,
+                    fast_test=False,
+                    fast_val=False,
             )
         else:
             self.dataloader = SlidingWindowTS(
@@ -172,9 +171,9 @@ class NES1Forecast(ForecastExp, NESParameters):
                 num_worker=self.num_worker,
                 time_enc=0,
                 time_index=True,
-                fast_train=True,
-                fast_test=True,
-                fast_val=True,
+                fast_train=False,
+                fast_test=False,
+                fast_val=False,
             )
         self.train_loader, self.val_loader, self.test_loader = (
             self.dataloader.train_loader,
@@ -312,7 +311,7 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 
     def _test(self):
-        super(NES1Forecast, self)._test()
+        super(NESForecast, self)._test()
         self.plot()
 
 
@@ -320,4 +319,4 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 if __name__ == "__main__":
     import fire
-    fire.Fire(NES1Forecast)
+    fire.Fire(NESForecast)

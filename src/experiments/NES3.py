@@ -34,24 +34,22 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes1 import NeuralEvolutionrySpectra
+from src.models.nes3 import NeuralEvolutionrySpectra
 
 
 @dataclass
 class NESParameters:
-    nw: int = 1024
     hidden_dim : int = 512
-    single_head : bool = True
 
 @dataclass
-class NES1Forecast(ForecastExp, NESParameters):
-    model_type: str = "NES1"
+class NESForecast(ForecastExp, NESParameters):
+    model_type: str = "NES3"
 
     def _init_model(self):
         self.model = NeuralEvolutionrySpectra(
+            input_len=self.windows,
+            pred_len=self.pred_len,
             hidden_dim=self.hidden_dim,
-            number_of_w=self.nw,
-            single_head=self.single_head
         )
         self.model = self.model.to(self.device)
 
@@ -312,7 +310,7 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 
     def _test(self):
-        super(NES1Forecast, self)._test()
+        super(NESForecast, self)._test()
         self.plot()
 
 
@@ -320,4 +318,4 @@ class NES1Forecast(ForecastExp, NESParameters):
 
 if __name__ == "__main__":
     import fire
-    fire.Fire(NES1Forecast)
+    fire.Fire(NESForecast)
