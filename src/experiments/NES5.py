@@ -34,16 +34,16 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes4 import NeuralEvolutionarySpectra
+from src.models.nes5 import NeuralEvolutionarySpectra
 
 
 @dataclass
 class NESParameters:
-    hidden_dim : int = 512
+    hidden_dim : int = 128
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES4"
+    model_type: str = "NES5"
 
     def _init_model(self):
         self.model = NeuralEvolutionarySpectra(
@@ -338,8 +338,9 @@ class NESForecast(ForecastExp, NESParameters):
 
 
     def _test(self):
-        super(NESForecast, self)._test()
         self.plot()
+        return super(NESForecast, self)._test()
+        
 
 
 

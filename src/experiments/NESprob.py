@@ -34,7 +34,7 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes4 import NeuralEvolutionarySpectra
+from src.models.NESprob import NeuralEvolutionarySpectraProb
 
 
 @dataclass
@@ -43,10 +43,10 @@ class NESParameters:
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES4"
+    model_type: str = "NESProb"
 
     def _init_model(self):
-        self.model = NeuralEvolutionarySpectra(
+        self.model = NeuralEvolutionarySpectraProb(
             input_len=self.windows,
             pred_len=self.pred_len,
             hidden_dim=self.hidden_dim,
@@ -70,9 +70,9 @@ class NESForecast(ForecastExp, NESParameters):
         # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
         # inp = inp.unsqueeze(-1)
         batch_x = batch_x.squeeze(-1)
-        results = self.model(batch_x) # [H]
+        mean, var = self.model(batch_x) # [H]
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
-        return results, batch_y.squeeze(2)
+        return mean, var, batch_y.squeeze(2)
 
     def _train(self):
         with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
@@ -91,7 +91,7 @@ class NESForecast(ForecastExp, NESParameters):
                 start = time.time()
                 origin_y = origin_y.to(self.device)
                 self.model_optim.zero_grad()
-                pred, true = self._process_one_batch(
+                pred, _, true = self._process_one_batch(
                     batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
                 )
                 if self.invtrans_loss:
@@ -208,7 +208,7 @@ class NESForecast(ForecastExp, NESParameters):
                     start = time.time()
                     origin_y = origin_y.to(self.device)
                     self.model_optim.zero_grad()
-                    preds, truths = self._process_one_batch(
+                    preds, _, truths = self._process_one_batch(
                         batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
                     )
                     # batch_origin_y = batch_origin_y.to(self.device)
@@ -288,10 +288,12 @@ class NESForecast(ForecastExp, NESParameters):
         all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
         # outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
         
-        outs, trues = self._process_one_batch(
+        outs, samples, trues = self._process_one_batch(
             all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index
         )
 
+        lower = torch.quantile(samples, 0.04, dim=0)   # 10th percentile → lower bound of 80% PI
+        upper = torch.quantile(samples, 0.96, dim=0)   # 90th percentile → upper bound of 80% PI
         # fig, axes = plt.subplots(all_batch_x.shape[2])
         # for i in range(all_batch_x.shape[2]):
         #     out = outs[:, :, i]
@@ -321,15 +323,21 @@ class NESForecast(ForecastExp, NESParameters):
             fig, axes = plt.subplots(1)
             pred_all = outs.squeeze().reshape(-1).detach().cpu().numpy()
             trues = trues.squeeze().reshape(-1).detach().cpu().numpy()
+            lower = lower.squeeze().reshape(-1).detach().cpu().numpy()
+            upper = upper.squeeze().reshape(-1).detach().cpu().numpy()
         
-            axes.plot(pred_all, label='pred')
+            # axes.plot(pred_all, label='pred')
             axes.plot(trues, label='y')
+            axes.plot(pred_all, label='Mean')
+            axes.fill_between(range(len(pred_all)), lower, upper, color='gray', alpha=0.2, label='Standard Error')
+
             plt.legend()
             plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
 
             fig, axes = plt.subplots(1)
-            axes.plot(pred_all[-2000:], label='pred')
-            axes.plot(trues[-2000:], label='y')
+            axes.plot(pred_all[-500:], label='Mean')
+            axes.fill_between(range(len(pred_all[-500:])),lower[-500:], upper[-500:], color='gray', alpha=0.2, label='Standard Error')
+            axes.plot(trues[-500:], label='y')
             plt.legend()
             plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
 

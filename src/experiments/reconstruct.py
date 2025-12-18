@@ -16,7 +16,7 @@ from torchmetrics import MeanAbsoluteError, MeanSquaredError, MetricCollection
 from tqdm import tqdm
 from torch.nn import MSELoss, L1Loss
 from torch.optim import *
-from torch_timeseries.dataloader.wrapper import MultiStepTimeFeatureSet, MultivariateFast
+from torch_timeseries.dataloader.wrapper import MultiStepTimeFeatureSet, MultivariateFast, ReconstructSet
 from torch_timeseries.dataset import *
 from torch_timeseries.scaler import *
 from src.datasets import *
@@ -25,23 +25,17 @@ from torch_timeseries.utils.early_stop import EarlyStopping
 from torch_timeseries.utils.parse_type import parse_type
 from torch_timeseries.utils.reproduce import reproducible
 from torch_timeseries.core import TimeSeriesDataset, BaseIrrelevant, BaseRelevant
-from torch_timeseries.dataloader import SlidingWindowTS, SlidingWindowTimeIndex, ETTHLoader, ETTMLoader
+from torch_timeseries.dataloader import SlidingWindowTS, SlidingWindowTimeIndex, ETTHLoader, ETTMLoader, Reconstruct
 from torch_timeseries.utils import asdict_exc
+from torch.utils.data import DataLoader, Dataset
 
 try:
     import wandb
 except:
     print("Warning: wandb is not installed, some funtionality may not work.")
+
 @dataclass
-class ForecastSettings:
-    horizon: int = 1
-    windows: int = 336
-    pred_len: int = 96
-    train_ratio: float = 0.7
-    test_ratio: float = 0.2
-    
-@dataclass
-class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
+class ReconstructExp(BaseRelevant, BaseIrrelevant):
     loss_func_type : str = 'mse'
     columns : List[int] = field(default_factory=lambda : [])
     
@@ -140,63 +134,9 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         )
     
     def _init_data_loader(self):
-        
         self._init_dataset()
-        
         self.scaler = parse_type(self.scaler_type, globals=globals())()
-        if self.dataset_type[0:3] == "ETT":
-            if self.dataset_type[0:4] == "ETTh":
-                self.dataloader = ETTHLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq=self.dataset.freq,
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
-                )
-            elif  self.dataset_type[0:4] == "ETTm":
-                self.dataloader = ETTMLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq=self.dataset.freq,
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
-                )
-        else:
-            self.dataloader = SlidingWindowTS(
-                self.dataset,
-                self.scaler,
-                window=self.windows,
-                horizon=self.horizon,
-                steps=self.pred_len,
-                scale_in_train=True,
-                shuffle_train=True,
-                freq=self.dataset.freq,
-                batch_size=self.batch_size,
-                train_ratio=self.train_ratio,
-                test_ratio=self.test_ratio,
-                num_worker=self.num_worker,
-                time_enc=0
-            )
-        self.train_loader, self.val_loader, self.test_loader = (
-            self.dataloader.train_loader,
-            self.dataloader.val_loader,
-            self.dataloader.test_loader,
-        )
-        self.train_steps = len(self.train_loader.dataset)
-        self.val_steps = len(self.val_loader.dataset)
-        self.test_steps = len(self.test_loader.dataset)
-
-        print(f"train steps: {self.train_steps}")
-        print(f"val steps: {self.val_steps}")
-        print(f"test steps: {self.test_steps}")
+        self.dataloader = Reconstruct(self.dataset, self.scaler, True, self.batch_size, self.num_worker)
 
     def _run_identifier(self, seed) -> str:
         ident = self.result_related_configs
@@ -225,7 +165,6 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
             "runs",
             self.model_type,
             self.dataset_type,
-            f"w{self.windows}h{self.horizon}s{self.pred_len}",
             self._run_identifier(seed),
         )
         self.run_checkpoint_filepath = os.path.join(
@@ -242,27 +181,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
             self.patience, verbose=True, path=self.best_checkpoint_filepath
         )
 
-    def _process_one_batch(
-        self,
-        batch_x,
-        batch_y,
-        batch_origin_x,
-        batch_origin_y,
-        batch_x_date_enc,
-        batch_y_date_enc,
-    ):
-        # inputs:
-        # batch_x:  (B, T, N)
-        # batch_y:  (B, Steps,T)
-        # batch_x_date_enc:  (B, T, N)
-        # batch_y_date_enc:  (B, T, Steps)
 
-        # outputs:
-        # pred: (B, O, N)
-        # label:  (B,O,N)
-        # for single step you should output (B, N)
-        # for multiple steps you should output (B, O, N)
-        raise NotImplementedError()
 
     def _evaluate(self, dataloader):
         self.model.eval()
@@ -271,29 +190,14 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         with torch.no_grad():
             with tqdm(total=len(dataloader.dataset)) as progress_bar:
                 for (
-                    batch_x,
-                    batch_y,
-                    batch_origin_x,
-                    batch_origin_y,
-                    batch_x_date_enc,
-                    batch_y_date_enc,
+                    batch_index,
+                    batch_x
                 ) in dataloader:
                     batch_size = batch_x.size(0)
-                    preds, truths = self._process_one_batch(
-                        batch_x, batch_y, batch_origin_x, batch_origin_y, batch_x_date_enc, batch_y_date_enc
+                    rec_X, X = self._process_one_batch(
+                        batch_index, batch_x
                     )
-                    batch_origin_y = batch_origin_y.to(self.device)
-                    if self.invtrans_loss:
-                        preds = self.scaler.inverse_transform(preds)
-                        truths = batch_origin_y
-                    if self.pred_len == 1:
-                        self.metrics.update(
-                            preds.contiguous().reshape(batch_size, -1),
-                            truths.contiguous().reshape(batch_size, -1),
-                        )
-                    else:
-                        self.metrics.update(preds.contiguous(), truths.contiguous())
-
+                    self.metrics.update(rec_X.contiguous(), X.contiguous())
                     progress_bar.update(batch_x.shape[0])
 
             result = {
@@ -301,55 +205,27 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
             }
         return result
 
-    def _test(self) -> Dict[str, float]:
-        print("Testing .... ")
-        test_result = self._evaluate(self.test_loader)
-
-        # if self._use_wandb():
-        #     import wandb
-        #     result = {}
-        #     for name, metric_value in test_result.items():
-        #         wandb.run.summary["test_" + name] = metric_value
-        #         result["test_" + name] = metric_value
-        #     wandb.log(result, step=self.current_epoch)
-
-        self._run_print(f"test_results: {test_result}")
-        return test_result
-
-    def _val(self):
-        print("Validating .... ")
-        val_result = self._evaluate(self.val_loader)
-        self._run_print(f"vali_results: {val_result}")
-        return val_result
 
     def _train(self):
-        with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
+        with torch.enable_grad(), tqdm(total=len(self.dataloader.dataset)) as progress_bar:
             self.model.train()
             train_loss = []
             for i, (
-                batch_x,
-                batch_y,
-                origin_x,
-                origin_y,
-                batch_x_date_enc,
-                batch_y_date_enc,
-            ) in enumerate(self.train_loader):
-                start = time.time()
-                origin_y = origin_y.to(self.device)
+                index,
+                X,
+            ) in enumerate(self.dataloader.dataloader):
                 self.model_optim.zero_grad()
-                pred, true = self._process_one_batch(
-                    batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc
-                )
-                if self.invtrans_loss:
-                    pred = self.scaler.inverse_transform(pred)
-                    true = origin_y
-                loss = self.loss_func(pred, true)
-                loss.backward()
 
+                X = X.to(self.device)
+                index = index.to(self.device)
+
+                rec_X =  self._process_one_batch(index, X)
+                loss = self.loss_func(rec_X, X)
+                loss.backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
-                progress_bar.update(batch_x.size(0))
+                progress_bar.update(X.size(0))
                 train_loss.append(loss.item())
                 progress_bar.set_postfix(
                     loss=loss.item(),
@@ -442,27 +318,22 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
             )
             self._run_print(f"Traininng loss : {np.mean(train_losses)}")
 
-            val_result = self._val()
-            test_result = self._test()
+            # val_result = self._val()
+            # test_result = self._test()
 
             self.current_epoch = self.current_epoch + 1
-            self.early_stopper(val_result[self.loss_func_type], model=self.model)
+            # self.early_stopper(val_result[self.loss_func_type], model=self.model)
 
             self._save_run_check_point(seed)
 
             if self._use_wandb():
                 wandb.log({'training_loss' : np.mean(train_losses)}, step=self.current_epoch)
-                wandb.log( {f"val_{k}": v for k, v in val_result.items()}, step=self.current_epoch)
-                wandb.log( {f"test_{k}": v for k, v in test_result.items()}, step=self.current_epoch)
+                # wandb.log( {f"val_{k}": v for k, v in val_result.items()}, step=self.current_epoch)
+                # wandb.log( {f"test_{k}": v for k, v in test_result.items()}, step=self.current_epoch)
 
             # self.scheduler.step()
 
-        self._load_best_model()
-        best_test_result = self._test()
-        if self._use_wandb():
-            for k, v in best_test_result.items(): wandb.run.summary[f"best_test_{k}"] = v 
-        
-        if self._use_wandb():  wandb.finish()
+        best_test_result = np.mean(train_losses) #self._test()
         return best_test_result
 
     def runs(self, seeds: List[int] = [1, 2, 3, 4, 5]):
@@ -470,7 +341,6 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         for i, seed in enumerate(seeds):
             result = self.run(seed=seed)
             results.append(result)
-
         return results
 
     def _save_run_check_point(self, seed):
@@ -492,99 +362,8 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         print("Run state saved ... ")
 
 
-
-
-    def plot(self):
-        
-        full_dataset = MultiStepTimeFeatureSet(
-            self.dataset,
-            scaler=self.scaler,
-            time_enc=3,
-            window=self.windows,
-            horizon=self.horizon,
-            steps=self.pred_len,
-            freq=self.dataset.freq,
-            single_variate=False,
-            scaler_fit=False,
-            time_index=True,
-        )
-
-        all_batch_x = []
-        all_batch_x_date_enc = []
-        all_batch_y_date_enc = []
-        all_batch_y = []
-        
-        all_x_index = []
-        all_y_index = []
-        
-
-        for i in range(0, len(full_dataset), self.pred_len) :
-            batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index = full_dataset[i]
-            all_batch_x.append(torch.tensor(batch_x))
-            all_batch_y.append(torch.tensor(batch_y))
-            all_batch_x_date_enc.append(torch.tensor(batch_x_date_enc))
-            all_batch_y_date_enc.append(torch.tensor(batch_y_date_enc))
-            
-            all_x_index.append(torch.tensor(x_index))
-            all_y_index.append(torch.tensor(y_index))
-            
-        all_batch_x = torch.stack(all_batch_x, dim=0).to(self.device).float() 
-        all_batch_y = torch.stack(all_batch_y, dim=0).to(self.device).float() 
-        all_x_date_enc = torch.stack(all_batch_x_date_enc, dim=0).to(self.device).float() 
-        all_y_date_enc = torch.stack(all_batch_y_date_enc, dim=0).to(self.device).float()
-        all_x_index = torch.stack(all_x_index, dim=0).to(self.device).float()
-        all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
-        # outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
-        
-        outs, trues = self._process_one_batch(
-            all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc
-        )
-
-        # fig, axes = plt.subplots(all_batch_x.shape[2])
-        # for i in range(all_batch_x.shape[2]):
-        #     out = outs[:, :, i]
-        #     pred_all = out.reshape(-1).detach().cpu().numpy()
-        #     y_all = all_batch_y[:, :, i].reshape(-1).detach().cpu().numpy()
-        #     axes[i].plot(pred_all, label='pred')
-        #     axes[i].plot(y_all, label='y')
-            
-        # plt.legend()
-
-
-
-        # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
-
-
-
-        # instance
-        if len(self.columns) >1:
-            last_n = 9
-            n = min(all_batch_x.shape[2], 10)
-            fig, axes = plt.subplots(n)
-            for i in range(n):
-                out = outs[-last_n:, :, i]
-                pred_all = out.reshape(-1).detach().cpu().numpy()
-                y_all = all_batch_y[-last_n:, :, i].reshape(-1).detach().cpu().numpy()
-                axes[i].plot(pred_all, label='pred')
-                axes[i].plot(y_all, label='y')
-                plt.legend()
-                plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
-
-        else:
-            fig, axes = plt.subplots(1)
-            pred_all = outs.squeeze().reshape(-1).detach().cpu().numpy()
-            trues = trues.squeeze().reshape(-1).detach().cpu().numpy()
-        
-            axes.plot(pred_all, label='pred')
-            axes.plot(trues, label='y')
-            plt.legend()
-            plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
-
-            fig, axes = plt.subplots(1)
-            axes.plot(pred_all[-2000:], label='pred')
-            axes.plot(trues[-2000:], label='y')
-            plt.legend()
-            plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
+    def _process_one_batch(index, x):
+        pass
 
 
 

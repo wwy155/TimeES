@@ -2,48 +2,132 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+def construct_hermitian_spectrum(A_half: torch.Tensor, M: int) -> torch.Tensor:
+    r"""
+    Construct a full Hermitian-symmetric complex spectrum of length M
+    from the first half (including DC and Nyquist if M is even).
+
+    Input:
+        A_half: Tensor of shape (..., K), where
+                K = M // 2 + 1   ← frequency dimension must be the LAST dimension
+                - A_half[..., 0]       : DC component
+                - A_half[..., 1:-1]    : positive frequencies (1 to M//2 - 1)
+                - A_half[..., -1]      : Nyquist frequency (only if M is even)
+
+        M: int, total number of frequency bins (FFT size)
+
+    Output:
+        A_full: Tensor of shape (..., M) satisfying Hermitian symmetry,
+                so that the inverse DFT yields a real-valued signal.
+    """
+    *dims, K = A_half.shape
+    expected_K = M // 2 + 1
+    assert K == expected_K, f"Expected A_half last dim = {expected_K}, got {K}"
+
+    if M % 2 == 0:
+        # Even M: [DC, f1, ..., f_{M/2-1}, Nyquist]
+        if K > 2:
+            # Extract positive frequencies excluding DC and Nyquist: indices 1 to -2
+            pos_freqs = A_half[..., 1:-1]               # shape: (..., M//2 - 1)
+            neg_freqs = torch.conj(pos_freqs.flip(-1))  # reverse order and conjugate
+        else:
+            # M=2 → K=2 → no middle frequencies
+            neg_freqs = torch.empty(*dims, 0, dtype=A_half.dtype, device=A_half.device)
+        A_full = torch.cat([A_half, neg_freqs], dim=-1)
+    else:
+        # Odd M: [DC, f1, ..., f_{(M-1)/2}]
+        if K > 1:
+            pos_freqs = A_half[..., 1:]                 # all except DC
+            neg_freqs = torch.conj(pos_freqs.flip(-1))
+        else:
+            # M=1 → K=1 → only DC
+            neg_freqs = torch.empty(*dims, 0, dtype=A_half.dtype, device=A_half.device)
+        A_full = torch.cat([A_half, neg_freqs], dim=-1)
+
+    # Final sanity check
+    assert A_full.shape[-1] == M, f"Output length {A_full.shape[-1]} != M={M}"
+    return A_full
+
+
 class EvolveA(nn.Module):
-    def __init__(self, hidden_dim=512, x_dim=1, seq_len=None, M=None):
+    def __init__(self, hidden_dim=512, x_dim=1, seq_len=None, out_len=None, M=None):
         super().__init__()
-        assert seq_len is not None and M is not None, "seq_len (T) and M must be specified"
+        assert seq_len is not None and M is not None and out_len is not None
         self.T = seq_len
+        self.O = out_len
         self.M = M
-        input_dim = seq_len * x_dim  # flatten full sequence
+
+        self.K = M // 2 + 1  # RFFT length
+
+        # Compute minimal number of real parameters per time step
+        if M % 2 == 0:
+            # Even: DC (1) + Nyquist (1) + (K-2) complex → total = 2 + 2*(K-2) = 2*K - 2
+            self.num_real_params_per_t = 2 * self.K - 2
+        else:
+            # Odd: DC (1) + (K-1) complex → total = 1 + 2*(K-1) = 2*K - 1
+            self.num_real_params_per_t = 2 * self.K - 1
+
+        input_dim = seq_len * x_dim
+        total_output_dim = self.num_real_params_per_t * self.O
 
         self.net = nn.Sequential(
-            nn.Flatten(start_dim=1),           # [B, T*x_dim]
+            nn.Flatten(start_dim=1),
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
             # nn.Linear(hidden_dim, hidden_dim),
             # nn.ReLU(),
-            # nn.Linear(hidden_dim, hidden_dim),
-            # nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * M * seq_len),  # real + imag for M×T grid
+            nn.Linear(hidden_dim, total_output_dim),
         )
 
     def forward(self, x):
         """
-        Input:
-          x: [B, T, x_dim]
-        Output:
-          A_complex: [B, M, T]   ← frequency × time spectrum
+        Output: A_full [B, M, O] with Hermitian symmetry and real DC/Nyquist.
         """
         B = x.shape[0]
-        out = self.net(x)                     # [B, 2*M*T]
-        out = out.view(B, 2, self.M, self.T)  # [B, 2, M, T]
-        real = out[:, 0]                      # [B, M, T]
-        imag = out[:, 1]                      # [B, M, T]
-        return torch.complex(real, imag)      # [B, M, T]
+        out = self.net(x)  # [B, total_output_dim]
+
+        # Reshape to [B, O, num_real_params_per_t] for easier indexing
+        out = out.view(B, self.O, self.num_real_params_per_t)
+
+        # Build A_half [B, O, K] as complex
+        A_half = torch.zeros(B, self.K, self.O, dtype=torch.complex64, device=x.device)
+
+        if self.M % 2 == 0:
+            # Even M: layout = [DC_real, Nyq_real, Re(f1), Im(f1), ..., Re(f_{K-2}), Im(f_{K-2})]
+            dc_real = out[:, :, 0]                     # [B, O]
+            nyq_real = out[:, :, 1]                    # [B, O]
+            mid = out[:, :, 2:].view(B, self.O, -1, 2) # [B, O, K-2, 2]
+
+            A_half[:, 0, :] = dc_real                  # DC
+            A_half[:, -1, :] = nyq_real                # Nyquist
+            A_half[:, 1:-1, :] = torch.complex(mid[:, :, :, 0], mid[:, :, :, 1]).permute(0, 2, 1)  # [B, K-2, O]
+        else:
+            # Odd M: layout = [DC_real, Re(f1), Im(f1), ..., Re(f_{K-1}), Im(f_{K-1})]
+            dc_real = out[:, :, 0]                     # [B, O]
+            mid = out[:, :, 1:].view(B, self.O, -1, 2) # [B, O, K-1, 2]
+
+            A_half[:, 0, :] = dc_real                  # DC
+            A_half[:, 1:, :] = torch.complex(mid[:, :, :, 0], mid[:, :, :, 1]).permute(0, 2, 1)   # [B, K-1, O]
+
+        # Now A_half has real DC (and Nyquist if even), rest complex
+        A_full = construct_hermitian_spectrum(A_half.permute(0, 2, 1), self.M)  # [B, O, M]
+        return A_full # [B, O, M]
+
 
 
 class NeuralEvolutionarySpectra(nn.Module):
-    def __init__(self, input_len, pred_len, hidden_dim, x_dim=1):
+    def __init__(self, input_len, pred_len, hidden_dim, K=None, x_dim=1):
         super().__init__()
         self.N = input_len
         self.H = pred_len
         self.T = input_len + pred_len
-        self.M = self.T
-        self.spectral_density = EvolveA(hidden_dim=hidden_dim, x_dim=x_dim, seq_len=input_len+pred_len, M=self.T)
+
+        self.M = input_len + pred_len # total num of freq
+
+        # if K==None:
+        #     K = self.M//2+1
+        self.spectral_density = EvolveA(hidden_dim=hidden_dim, x_dim=x_dim, seq_len=input_len, out_len=input_len+pred_len, M=input_len+pred_len)
 
     def forward(self, x_hist, return_A=False):
         """
@@ -72,17 +156,9 @@ class NeuralEvolutionarySpectra(nn.Module):
         omega = torch.where(omega > torch.pi, omega - 2 * torch.pi, omega)  # Optional shift
         omega = omega.unsqueeze(0).expand(B, M)  # [B, M]
 
-        # Build full x input: [B, T, 1]
-        x_future_placeholder = torch.zeros(B, H, 1, device=device)
-        x_all = torch.cat([x_hist, x_future_placeholder], dim=1)  # [B, T, 1]
-
-        # Build mask: 1 for history, 0 for future
-        mask_hist = torch.ones(B, N, dtype=torch.bool, device=device)
-        mask_fut = torch.zeros(B, H, dtype=torch.bool, device=device)
-        mask_all = torch.cat([mask_hist, mask_fut], dim=1)  # [B, T]
 
         # Get A(t, ω) for all t in [0, T-1] and all ω
-        A_all = self.spectral_density(x_all)  # [B, T, M]
+        A_all = self.spectral_density(x_hist)  # [B, T, M]
 
         # Set W_k = 1 (deterministic)
         W = torch.ones(M, dtype=torch.complex64, device=device).unsqueeze(0).expand(B, M)  # [B, M]
@@ -94,17 +170,14 @@ class NeuralEvolutionarySpectra(nn.Module):
         integrand = A_all * phase  # [B, T, M]
         X_complex = (1.0 / torch.sqrt(torch.tensor(M, dtype=torch.float32, device=device))) * \
                     torch.sum(integrand, dim=-1)  # [B, T]
-
         # Take real part
         X_real = X_complex.real  # [B, T]
 
         # Return only future part
         x_pred = X_real[:, -H:]  # [B, H]
-
         if return_A:
-            return x_pred, A_all
-
-        return x_pred
+            return X_real, A_all
+        return X_real
 
 
 

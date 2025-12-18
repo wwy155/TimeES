@@ -36,7 +36,7 @@ class SimFreqCF(TimeSeriesDataset):
         data = np.zeros((len(dates), self.num_features))
         freqs_mag = ([(1, 2)])
         # freqs = (12,48,64)
-        T = [(12, 96)]
+        T = [(64, 128)]
         
         
         Periods = np.linspace(T[0][0], T[0][1], len(dates))
@@ -71,8 +71,6 @@ class SimFreqCF(TimeSeriesDataset):
             freq_signals  = 0 
             # for j in range(0, i+1):
             w = 2*np.pi / Periods
-            print(w)
-            print(T)
             freq_signals += np.sin(w * t)
             x = mags*freq_signals
             # x += +  (t // n)

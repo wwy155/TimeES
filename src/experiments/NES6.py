@@ -34,16 +34,39 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes4 import NeuralEvolutionarySpectra
+from src.models.nes6 import NeuralEvolutionarySpectra
+from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz
 
+def spectral_entropy_loss(A_full: torch.Tensor, eps=1e-8) -> torch.Tensor:
+    """
+    Compute spectral entropy of complex spectrum without for-loops.
+    
+    Args:
+        A_full: Complex tensor of shape [..., M]
+                Common shapes: [B, M] or [B, M, O]
+    Returns:
+        Scalar tensor: mean entropy over all non-frequency dimensions.
+    """
+    # Compute power spectrum: |A|^2
+    power = torch.abs(A_full)  # [..., M]
+
+    # Normalize to get probability distribution over frequency axis (-1)
+    total_power = power.sum(dim=-1, keepdim=True)  # [..., 1]
+    p = power / (total_power + eps)  # [..., M], sum(p, dim=-1) ≈ 1
+
+    # Compute entropy: -sum(p * log(p))
+    entropy = -(p * torch.log(p + eps)).sum(dim=-1)  # [...], scalar per sample/time
+
+    # Return mean over all non-frequency dimensions (e.g., B and O)
+    return entropy.mean()
 
 @dataclass
 class NESParameters:
-    hidden_dim : int = 512
+    hidden_dim : int = 128
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES4"
+    model_type: str = "NES6"
 
     def _init_model(self):
         self.model = NeuralEvolutionarySpectra(
@@ -52,6 +75,29 @@ class NESForecast(ForecastExp, NESParameters):
             hidden_dim=self.hidden_dim,
         )
         self.model = self.model.to(self.device)
+
+    def _process_train_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
+        # inputs:
+        # batch_x: (B, T, N)
+        # batch_y: (B, O, N)
+        # ouputs:
+        # - pred: (B, N)/(B, O, N)
+        # - label: (B, N)/(B, O, N)
+
+        batch_x = batch_x.to(self.device, dtype=torch.float32)
+        batch_y = batch_y.to(self.device, dtype=torch.float32)
+        batch_x_date_enc = batch_x_date_enc.to(self.device).float()
+        batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+        # x_index = x_index.to(self.device).float().squeeze(-1) 
+        # y_index = y_index.to(self.device).float().squeeze(-1) 
+        # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
+        # inp = inp.unsqueeze(-1)
+        y = torch.concat([batch_x, batch_y], dim=1)
+        batch_x = batch_x.squeeze(-1)
+        results, A = self.model(batch_x, return_A=True) # [H]
+        # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
+        return results, y.squeeze(2), A
+
 
     def _process_one_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
         # inputs:
@@ -72,7 +118,7 @@ class NESForecast(ForecastExp, NESParameters):
         batch_x = batch_x.squeeze(-1)
         results = self.model(batch_x) # [H]
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
-        return results, batch_y.squeeze(2)
+        return results[:, -self.pred_len:], batch_y.squeeze(2)
 
     def _train(self):
         with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
@@ -91,13 +137,14 @@ class NESForecast(ForecastExp, NESParameters):
                 start = time.time()
                 origin_y = origin_y.to(self.device)
                 self.model_optim.zero_grad()
-                pred, true = self._process_one_batch(
+                pred, true, A = self._process_train_batch(
                     batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
                 )
                 if self.invtrans_loss:
                     pred = self.scaler.inverse_transform(pred)
                     true = origin_y
-                loss = self.loss_func(pred, true)
+                loss = self.loss_func(pred, true) + spectral_entropy_loss(A)
+                # print(self.loss_func(pred, true), spectral_entropy_loss(A))
                 loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(
@@ -335,11 +382,10 @@ class NESForecast(ForecastExp, NESParameters):
 
 
 
-
-
     def _test(self):
-        super(NESForecast, self)._test()
         self.plot()
+        return super(NESForecast, self)._test()
+        
 
 
 
