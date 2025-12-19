@@ -41,10 +41,10 @@ from src.utils.pesudo_amplitude import get_initial_amplitude_stft_torch
 
 @dataclass
 class NESParameters:
-    hidden_dim : int = 128
-    M : int = 201
-    K : int = 3
-    hop_length : int = 201
+    hidden_dim : int = 156
+    M : int = 200
+    K : int = 1
+    hop_length : int = 200
 
 @dataclass
 class NESReconstruct(ReconstructExp, NESParameters):
@@ -52,7 +52,7 @@ class NESReconstruct(ReconstructExp, NESParameters):
 
     def _init_model(self):
         A_init, omegas  = get_initial_amplitude_stft_torch(
-            torch.tensor(self.dataset.data.squeeze()), 
+            torch.tensor(self.dataloader.recon_set.scaled_data.squeeze()), 
             n_fft=self.M, 
             hop_length=self.hop_length,
         )

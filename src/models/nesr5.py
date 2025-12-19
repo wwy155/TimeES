@@ -47,23 +47,22 @@ class NeuralEvolutionarySpectra(nn.Module):
         A_to_use = A_all
 
         # # Optional: apply top-k masking per time step
-        # if topk is not None and topk < A_all.shape[-1]:
-        #     # Compute magnitude |A|
-        #     mag = torch.abs(A_all)  # [..., T, M]
+        if topk is not None and topk < A_all.shape[-1]:
+            # Compute magnitude |A|
+            mag = torch.abs(A_all)  # [..., T, M]
 
-        #     # Find top-k indices along frequency axis (dim=-1)
-        #     _, topk_indices = torch.topk(mag, k=topk, dim=-1, largest=True, sorted=False)
+            # Find top-k indices along frequency axis (dim=-1)
+            _, topk_indices = torch.topk(mag, k=topk, dim=-1, largest=True, sorted=False)
 
-        #     # Create a mask of same shape as A_all
-        #     mask = torch.zeros_like(A_all, dtype=torch.bool)
-        #     mask.scatter_(dim=-1, index=topk_indices, value=True)
+            # Create a mask of same shape as A_all
+            mask = torch.zeros_like(A_all, dtype=torch.bool)
+            mask.scatter_(dim=-1, index=topk_indices, value=True)
 
-        #     # Zero out non-top-k components
-        #     A_sparse = torch.where(mask, A_all, torch.zeros_like(A_all))
-        #     A_to_use = A_sparse
-        # else:
-        #     A_to_use = A_all
-
+            # Zero out non-top-k components
+            A_sparse = torch.where(mask, A_all, torch.zeros_like(A_all))
+            A_to_use = A_sparse
+        else:
+            A_to_use = A_all
         # Phase term: exp(i * ω_k * t_n)
         # Assume self.omegas: [M]
         phase = torch.exp(1j * torch.einsum('...t,m->...tm', t_index.float(), self.omegas.to(device)))  # [..., T, M]
