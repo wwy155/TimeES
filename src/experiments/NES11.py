@@ -34,51 +34,30 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes9 import NeuralEvolutionarySpectra
+from src.models.nes11 import NeuralEvolutionarySpectra
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
-from src.utils.pesudo_amplitude import get_initial_amplitude_stft_torch
-
-def spectral_entropy_loss(A_full: torch.Tensor, eps=1e-8) -> torch.Tensor:
-    """
-    Compute spectral entropy of complex spectrum without for-loops.
-    
-    Args:
-        A_full: Complex tensor of shape [..., M]
-                Common shapes: [B, M] or [B, M, O]
-    Returns:
-        Scalar tensor: mean entropy over all non-frequency dimensions.
-    """
-    # Compute power spectrum: |A|^2
-    power = torch.abs(A_full)  # [..., M]
-
-    # Normalize to get probability distribution over frequency axis (-1)
-    total_power = power.sum(dim=-1, keepdim=True)  # [..., 1]
-    p = power / (total_power + eps)  # [..., M], sum(p, dim=-1) ≈ 1
-
-    # Compute entropy: -sum(p * log(p))
-    entropy = -(p * torch.log(p + eps)).sum(dim=-1)  # [...], scalar per sample/time
-
-    # Return mean over all non-frequency dimensions (e.g., B and O)
-    return entropy.mean()
+from src.utils.pesudo_amplitude import get_initial_amplitude_right_stft_torch
 
 @dataclass
 class NESParameters:
     hidden_dim : int = 128
     M : int = 100
-    # energy_ratio : float = 0.96
+    topk : int = 100
+    energy_ratio : float = 0.96
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES9"
+    model_type: str = "NES11"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
-        A_init, omegas  = get_initial_amplitude_stft_torch(
+        #  A_init, omegas  = get_initial_amplitude_stft_torch( this will lead to label leak
+        #  A_init, omegas  = get_initial_amplitude_right_stft_torch is ok
+        A_init, omegas  = get_initial_amplitude_right_stft_torch(
             torch.tensor(scaled_data.squeeze()), 
             n_fft=self.M, 
             hop_length=self.M,
         )
-
 
         self.model = NeuralEvolutionarySpectra(
             self.dataset.length,
@@ -89,16 +68,9 @@ class NESForecast(ForecastExp, NESParameters):
             torch.tensor(A_init).cfloat(),
             omegas,
             freq_indices=torch.arange(len(omegas)),
+            topk=self.topk,
             hidden_dim=self.hidden_dim
         )        
-
-
-
-        # self.model = NeuralEvolutionarySpectra(
-        #     input_len=self.windows,
-        #     pred_len=self.pred_len,
-        #     hidden_dim=self.hidden_dim,
-        # )
         self.model = self.model.to(self.device)
 
     def _process_train_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
@@ -125,10 +97,10 @@ class NESForecast(ForecastExp, NESParameters):
         results, A = self.model(batch_x, x_index, y_index) # [H]
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
         # return results, y.squeeze(2), A
-        return results[:, -self.pred_len:], batch_y.squeeze(2), A
+        return results, y.squeeze(2), A
 
 
-    def _process_one_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
+    def _process_one_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index, return_A=False):
         # inputs:
         # batch_x: (B, T, N)
         # batch_y: (B, O, N)
@@ -149,7 +121,11 @@ class NESForecast(ForecastExp, NESParameters):
         batch_x = batch_x.squeeze(-1)
         results, A = self.model(batch_x, x_index, y_index) # [H]
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
+        if return_A:
+            return results[:, -self.pred_len:], batch_y.squeeze(2), A
         return results[:, -self.pred_len:], batch_y.squeeze(2)
+
+
 
     def _train(self):
         with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
@@ -363,8 +339,8 @@ class NESForecast(ForecastExp, NESParameters):
         all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
         # outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
         
-        outs, trues = self._process_one_batch(
-            all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index
+        outs, trues, A = self._process_one_batch(
+            all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index, return_A=True
         )
 
         # fig, axes = plt.subplots(all_batch_x.shape[2])
@@ -388,7 +364,7 @@ class NESForecast(ForecastExp, NESParameters):
                 pred_all = out.reshape(-1).detach().cpu().numpy()
                 y_all = all_batch_y[-last_n:, :, i].reshape(-1).detach().cpu().numpy()
                 axes[i].plot(pred_all, label='pred')
-                axes[i].plot(y_all, label='y')
+                # axes[i].plot(y_all, label='y')
                 plt.legend()
                 plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
 
@@ -404,9 +380,83 @@ class NESForecast(ForecastExp, NESParameters):
 
             fig, axes = plt.subplots(1)
             axes.plot(pred_all[-2000:], label='pred')
-            axes.plot(trues[-2000:], label='y')
+            # axes.plot(trues[-2000:], label='y')
             plt.legend()
             plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
+
+
+            
+            A = A.detach().cpu().numpy()  # shape: [T, M]
+            A_Y = A[:, -self.pred_len:, :].reshape(-1, A.shape[-1])  # shape: (A*B, C)
+            magnitude = np.abs(A_Y)  # [T, M]
+            time_steps = np.arange(A_Y.shape[0])      # [T]
+            freq_bins = np.arange(A_Y.shape[1])       # [M]
+            Time, Freq = np.meshgrid(time_steps, freq_bins, indexing='ij')
+
+            # 创建 3 行 1 列的子图
+            fig = plt.figure(figsize=(12, 12))
+
+            # 子图 2: 3D 频谱图（你的 A 的 magnitude）
+            ax2 = fig.add_subplot(211, projection='3d')
+            surf = ax2.plot_surface(Time, Freq, magnitude, cmap='viridis', linewidth=0, antialiased=False)
+            fig.colorbar(surf, ax=ax2, shrink=0.5, aspect=10)
+            ax2.set_xlabel('Time')
+            ax2.set_ylabel('Frequency Bin')
+            ax2.set_zlabel('Magnitude')
+            ax2.set_title('3D Magnitude Spectrogram (Learned A)')
+
+            ax3 = fig.add_subplot(212)
+            # 注意：magnitude 是 [T, M]，imshow 默认 (行=时间, 列=频率)
+            # 但通常 spectrogram 是 频率在 y 轴，时间在 x 轴 → 所以 transpose 或调整 origin
+            im = ax3.imshow(
+                magnitude.T,               # 转置：shape [M, T] → freq on y, time on x
+                aspect='auto',
+                origin='lower',            # 低频在底部，高频在顶部
+                cmap='viridis',
+                interpolation='nearest'
+            )
+            ax3.set_xlabel('Time Index')
+            ax3.set_ylabel('Frequency Bin')
+            ax3.set_title('Learned Magnitude Spectrogram (|A|)')
+            fig.colorbar(im, ax=ax3, label='Magnitude')
+            plt.legend()
+            plt.savefig(os.path.join(self.run_save_dir, 'spectrum.png'))
+
+            A_X = A[:, :self.windows, :].reshape(-1, A.shape[-1])  # shape: (A*B, C)
+            magnitude = np.abs(A_X)  # [T, M]
+            time_steps = np.arange(A_X.shape[0])      # [T]
+            freq_bins = np.arange(A_X.shape[1])       # [M]
+            Time, Freq = np.meshgrid(time_steps, freq_bins, indexing='ij')
+
+            # 创建 3 行 1 列的子图
+            fig = plt.figure(figsize=(12, 12))
+
+            # 子图 2: 3D 频谱图（你的 A 的 magnitude）
+            ax2 = fig.add_subplot(211, projection='3d')
+            surf = ax2.plot_surface(Time, Freq, magnitude, cmap='viridis', linewidth=0, antialiased=False)
+            fig.colorbar(surf, ax=ax2, shrink=0.5, aspect=10)
+            ax2.set_xlabel('Time')
+            ax2.set_ylabel('Frequency Bin')
+            ax2.set_zlabel('Magnitude')
+            ax2.set_title('3D Magnitude Spectrogram (Learned A)')
+
+            ax3 = fig.add_subplot(212)
+            # 注意：magnitude 是 [T, M]，imshow 默认 (行=时间, 列=频率)
+            # 但通常 spectrogram 是 频率在 y 轴，时间在 x 轴 → 所以 transpose 或调整 origin
+            im = ax3.imshow(
+                magnitude.T,               # 转置：shape [M, T] → freq on y, time on x
+                aspect='auto',
+                origin='lower',            # 低频在底部，高频在顶部
+                cmap='viridis',
+                interpolation='nearest'
+            )
+            ax3.set_xlabel('Time Index')
+            ax3.set_ylabel('Frequency Bin')
+            ax3.set_title('Learned Magnitude Spectrogram (|A|)')
+            fig.colorbar(im, ax=ax3, label='Magnitude')
+            plt.legend()
+            plt.savefig(os.path.join(self.run_save_dir, 'Xspectrum.png'))
+
 
 
 

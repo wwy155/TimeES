@@ -47,6 +47,6 @@ class LinearChirp(TimeSeriesDataset):
         self.df = pd.DataFrame(x, columns=[ f"data{i}" for i in range(self.num_features)])
         self.df['date'] = dates
         self.dates =  pd.DataFrame({'date': dates})
-        self.data = self.df.drop('date', axis=1).values        
+        self.data = self.df.drop('date', axis=1).values
         return self.data
 

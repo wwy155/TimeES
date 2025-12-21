@@ -249,108 +249,6 @@ def get_initial_amplitude_stft_torch_nopad(
 
 
 
-
-# def get_initial_amplitude_stft_torch(
-#     x,
-#     n_fft=None,
-#     hop_length=None,
-#     fs=1.0,
-#     window='boxcar',
-#     return_stft=False,
-#     device=None
-# ):
-#     """
-#     Estimate initial complex evolutionary amplitude A(t, omega) using torch.stft.
-    
-#     Matches synthesis model: x[n] ≈ (1/√M) Σ_k A(n, ω_k) e^{i ω_k n}
-    
-#     Each STFT frame is held constant over its hop interval (zero-order hold in time).
-    
-#     Args:
-#         x: (T,) real tensor, dtype=torch.float32 or float64
-#         n_fft: FFT size (default = min(256, T))
-#         hop_length: hop size (default = n_fft // 8)
-#         fs: sampling frequency (default=1.0 → dt=1)
-#         window: 'boxcar', 'hann', 'hamming'
-#         return_stft: if True, also return unscaled STFT
-#         device: torch device (optional)
-
-#     Returns:
-#         A_interp: (T, M) complex tensor — initial A(t, ω), M = n_fft
-#         omega: (M,) angular frequencies in rad/sample, ordered from -π to π
-#         stft_interp (optional): same as A_interp before √M scaling
-#     """
-#     assert x.ndim == 1, "Input x must be 1D"
-#     T = x.shape[0]
-#     dt = 1.0 / fs
-#     dtype = x.dtype
-#     if device is None:
-#         device = x.device
-
-#     if n_fft is None:
-#         n_fft = min(256, T)
-#     if hop_length is None:
-#         hop_length = n_fft // 8
-
-#     # --- Create window ---
-#     if window == 'boxcar':
-#         win = torch.ones(n_fft, dtype=dtype, device=device)
-#     elif window == 'hann':
-#         win = torch.hann_window(n_fft, periodic=True, dtype=dtype, device=device)
-#     elif window == 'hamming':
-#         win = torch.hamming_window(n_fft, periodic=True, dtype=dtype, device=device)
-#     else:
-#         raise ValueError(f"Unsupported window: {window}")
-
-#     # win_norm = torch.norm(win).item()
-
-#     # --- Compute two-sided STFT (no center padding for clean time alignment) ---
-#     Zxx = torch.stft(
-#         x,
-#         n_fft=n_fft,
-#         hop_length=hop_length,
-#         win_length=n_fft,
-#         window=win,
-#         center=True,
-#         normalized=True,
-#         onesided=False,
-#         return_complex=True
-#     )  # shape: (n_fft, n_frames)
-
-#     # M is fixed by n_fft
-#     M = n_fft
-
-#     # Reorder frequencies to [-π, ..., π) via fftshift
-#     Zxx = torch.fft.fftshift(Zxx, dim=0)  # (M, n_frames)
-
-#     # Scale to match synthesis model: x[n] ≈ (1/√M) Σ A e^{iωn}
-#     scale = torch.sqrt(torch.tensor(M, dtype=dtype, device=device))
-#     A_complex =  Zxx  # (M, n_frames)
-
-#     # --- Zero-order hold in time (no interpolation) ---
-#     n_frames_actual = Zxx.shape[1]  # ← use actual STFT frame count
-
-#     # Compute frame index for each time sample: j = round(t / hop_length)
-#     t_indices = torch.arange(T, device=device, dtype=torch.float32)
-#     frame_indices = torch.round(t_indices / hop_length).long()
-#     frame_indices = torch.clamp(frame_indices, 0, n_frames_actual - 1)
-
-#     # Broadcast assignment: (M, T) -> transpose to (T, M)
-#     A_interp = A_complex[:, frame_indices].t()  # (T, M)
-
-#     # --- Angular frequencies (rad/sample) ---
-#     freqs_hz = torch.fft.fftshift(torch.fft.fftfreq(M, d=dt)).to(device=device, dtype=dtype)
-#     omega = 2 * torch.pi * freqs_hz  # (M,)
-
-#     if return_stft:
-#         # Since no extra scaling was applied, stft_interp == A_interp
-#         return A_interp, omega, A_interp
-#     else:
-#         return A_interp, omega
-
-
-
-
 def get_initial_amplitude_stft_torch(
     x,
     n_fft=None,
@@ -465,3 +363,107 @@ def get_initial_amplitude_stft_torch(
         return A_interp, omega, A_interp
     else:
         return A_interp, omega
+
+def get_initial_amplitude_right_stft_torch(
+    x,
+    n_fft=None,
+    hop_length=None,
+    fs=1.0,
+    window='boxcar',
+    return_stft=False,
+    device=None,
+    phase_remodulate=True,
+):
+    assert x.ndim == 1, "Input x must be 1D"
+    T = x.shape[0]
+    dt = 1.0 / fs
+    dtype = x.dtype
+    if device is None:
+        device = x.device
+
+    if n_fft is None:
+        n_fft = min(256, T)
+    if hop_length is None:
+        hop_length = n_fft // 8
+
+    # Left pad so t=0 can be the last sample of first frame
+    pad_left = n_fft - 1
+    x_left_padded = F.pad(x, (pad_left, 0))
+    T_orig = x.shape[0]
+
+    # Compute the maximum frame index we will need
+    max_t = T_orig - 1
+    max_frame_idx = (max_t + pad_left) // hop_length   # this is the largest j we will index
+
+    # Minimum signal length required to compute frame `max_frame_idx`
+    min_len_required = max_frame_idx * hop_length + n_fft
+
+    # Right-pad if necessary
+    current_len = x_left_padded.shape[0]
+    if current_len < min_len_required:
+        pad_right = min_len_required - current_len
+        x_pad = F.pad(x_left_padded, (0, pad_right))
+    else:
+        x_pad = x_left_padded
+
+
+    # --- Create window ---
+    if window == 'boxcar':
+        win = torch.ones(n_fft, dtype=dtype, device=device)
+    elif window == 'hann':
+        win = torch.hann_window(n_fft, periodic=True, dtype=dtype, device=device)
+    elif window == 'hamming':
+        win = torch.hamming_window(n_fft, periodic=True, dtype=dtype, device=device)
+    else:
+        raise ValueError(f"Unsupported window: {window}")
+
+    # --- STFT with center=False ---
+    Zxx = torch.stft(
+        x_pad,
+        n_fft=n_fft,
+        hop_length=hop_length,
+        win_length=n_fft,
+        window=win,
+        center=False,
+        normalized=True,
+        onesided=False,
+        return_complex=True
+    )  # shape: (n_fft, n_frames)
+
+    # Reorder frequencies to [-π, π)
+    Zxx = torch.fft.fftshift(Zxx, dim=0)  # (M, n_frames)
+    M = n_fft
+    A_complex = Zxx  # no √M scaling
+
+    # --- Map each t to its frame ---
+    t_indices = torch.arange(T, device=device)
+    frame_indices = (t_indices + pad_left) // hop_length  # (T,)
+    # Now guaranteed: frame_indices.max() < A_complex.shape[1]
+    A_interp = A_complex[:, frame_indices].t()  # (T, M)
+
+    # --- Angular frequencies ---
+    freqs_hz = torch.fft.fftshift(torch.fft.fftfreq(M, d=dt)).to(device=device, dtype=dtype)
+    omega = 2 * torch.pi * freqs_hz  # (M,)
+
+    if phase_remodulate:
+        # phase re-modulation
+        j_vals = frame_indices  # shape (T,)
+        t_start = j_vals * hop_length - (n_fft - 1)  # shape (T,)
+
+        # omega is (M,) → angular frequencies
+        # We need phase = exp(-1j * omega * t_start) → shape (T, M)
+        phase_factor = torch.exp(-1j * t_start.unsqueeze(1) * omega.unsqueeze(0))  # (T, M)
+        # Apply phase correction
+        A_interp = A_interp * phase_factor
+
+
+
+
+    if return_stft:
+        return A_interp, omega, A_interp
+    else:
+        return A_interp, omega
+
+
+
+

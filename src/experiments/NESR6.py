@@ -36,7 +36,7 @@ from scipy.signal import spectrogram
 import torch
 from src.experiments.reconstruct import ReconstructExp
 from src.models.nesr5 import NeuralEvolutionarySpectra
-from src.utils.pesudo_amplitude import get_initial_amplitude_stft_torch
+from src.utils.pesudo_amplitude import get_initial_amplitude_right_stft_torch
 
 
 @dataclass
@@ -44,17 +44,17 @@ class NESParameters:
     hidden_dim : int = 156
     M : int = 200
     K : int = 20
-    hop_length : int = 200
+    hop_length : int = 10
 
 @dataclass
 class NESReconstruct(ReconstructExp, NESParameters):
-    model_type: str = "NESR5"
+    model_type: str = "NESR6"
 
     def _init_model(self):
-        A_init, omegas  = get_initial_amplitude_stft_torch(
+        A_init, omegas  = get_initial_amplitude_right_stft_torch(
             torch.tensor(self.dataloader.recon_set.scaled_data.squeeze()), 
             n_fft=self.M, 
-            hop_length=self.M,
+            hop_length=self.hop_length,
         )
         self.model = NeuralEvolutionarySpectra(
             self.dataset.length, 
