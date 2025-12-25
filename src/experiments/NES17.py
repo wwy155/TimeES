@@ -36,17 +36,18 @@ import torch
 from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_stft_torch, get_initial_amplitude_stft_torch
-from src.models.nes16 import NeuralEvolutionarySpectra
+from src.models.nes17 import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
     hidden_dim : int = 512
+    topk : int = 20
     additive_scale : bool = True
     use_norm : bool = False
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES16"
+    model_type: str = "NES17"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -64,6 +65,7 @@ class NESForecast(ForecastExp, NESParameters):
             self.windows,
             self.pred_len,
             self.device,
+            topk=self.topk,
             hidden_dim=self.hidden_dim,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm
