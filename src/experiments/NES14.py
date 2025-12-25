@@ -34,7 +34,7 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
-from src.models.nes11 import NeuralEvolutionarySpectra
+from src.models.nes14 import NeuralEvolutionarySpectra
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_stft_torch, get_initial_amplitude_stft_torch
 
@@ -42,12 +42,11 @@ from src.utils.pesudo_amplitude import get_initial_amplitude_right_stft_torch, g
 class NESParameters:
     hidden_dim : int = 128
     M : int = 100
-    topk : int = 12
-    energy_ratio : float = 0.96
+    topk : int = 20
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES11"
+    model_type: str = "NES14"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -58,19 +57,16 @@ class NESForecast(ForecastExp, NESParameters):
             n_fft=self.M, 
         )
 
-        A0_torch = torch.tensor(A_init).cfloat()
-        energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
-        _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
+        A0_torch = torch.tensor(A_init).to(self.device).cfloat()
+        # energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
+        # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
 
         self.model = NeuralEvolutionarySpectra(
-            self.dataset.length,
             self.windows,
             self.pred_len,
-            self.M, 
             self.device,
-            A0_torch,
-            omegas,
-            freq_indices=topk_indices,
+            omegas=omegas,
+            A_init=A0_torch,
             topk=self.topk,
             hidden_dim=self.hidden_dim
         )        

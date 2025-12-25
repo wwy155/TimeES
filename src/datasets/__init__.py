@@ -4,3 +4,4 @@ from .SimFreq3F import SimFreq3F
 from .SimFreq1F import SimFreq1F
 from .SimFreqCF import SimFreqCF
 from .LinearChirp import LinearChirp
+from .LinearChirp1 import LinearChirp1

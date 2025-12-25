@@ -39,11 +39,12 @@ class ForecastSettings:
     pred_len: int = 96
     train_ratio: float = 0.7
     test_ratio: float = 0.2
-    
+
 @dataclass
 class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
     loss_func_type : str = 'mse'
     columns : List[int] = field(default_factory=lambda : [])
+    lr: float = 0.001
     
     def config_wandb(
         self,
@@ -282,6 +283,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
                     preds, truths = self._process_one_batch(
                         batch_x, batch_y, batch_origin_x, batch_origin_y, batch_x_date_enc, batch_y_date_enc
                     )
+
                     batch_origin_y = batch_origin_y.to(self.device)
                     if self.invtrans_loss:
                         preds = self.scaler.inverse_transform(preds)

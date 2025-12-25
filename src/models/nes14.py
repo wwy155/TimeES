@@ -8,18 +8,41 @@ def synthesize_signal_on_subband(A_vals, selected_omegas, M, t_index):
     
     Args:
         A_vals: [..., T, K], complex64
-        selected_omegas: [K], angular frequencies (rad/sample)
-        t_index: [..., T], time indices (long or float)
+        selected_omegas: [B, K], angular frequencies (rad/sample)
+        t_index: [B, T], time indices (long or float)
 
     Returns:
         x: [..., T], real
     """
     device = A_vals.device
-    # phase = torch.exp(1j * torch.einsum('bt,btk->btk', t_index.float(), selected_omegas.to(device)))
+    phase = torch.exp(1j * torch.einsum('...t,...k->...tk', t_index.float(), selected_omegas.to(device)))
+    # phase = torch.exp(1j * t_index.unsqueeze(-1) * selected_omegas)
+    integrand = A_vals * phase
+    x_complex = (1.0 / torch.sqrt(torch.tensor(M, dtype=torch.float32, device=device))) * \
+                torch.sum(integrand, dim=-1)
+    # x_complex =  torch.sum(integrand, dim=-1)
+    return x_complex.real
+
+
+def synthesize_signal_piece_omegeas(A_vals, selected_omegas, M, t_index):
+    """
+    Synthesize real-valued signal from complex amplitudes on a subset of frequencies.
+    
+    Args:
+        A_vals: [..., T, K], complex64
+        selected_omegas: [B, K], angular frequencies (rad/sample)
+        t_index: [B, T], time indices (long or float)
+
+    Returns:
+        x: [..., T], real
+    """
+    device = A_vals.device
+    # phase = torch.exp(1j * torch.einsum('...t,...k->...tk', t_index.float(), selected_omegas.to(device)))
     phase = torch.exp(1j * t_index.unsqueeze(-1) * selected_omegas)
     integrand = A_vals * phase
     x_complex = (1.0 / torch.sqrt(torch.tensor(M, dtype=torch.float32, device=device))) * \
                 torch.sum(integrand, dim=-1)
+    # x_complex =  torch.sum(integrand, dim=-1)
     return x_complex.real
 
 
@@ -51,46 +74,45 @@ class GlobalEvolveAOnSubband(nn.Module):
 class NeuralEvolutionarySpectra(nn.Module):
     def __init__(
         self,
-        T_total,
         input_len,
         out_len,
-        M,
         device,
-        init_A_full,        # [T_total, M], complex64
-        omegas,             # [M], angular frequencies (rad/sample)
-        freq_indices,       # [K_eff], long tensor of selected bin indices
+        omegas,
+        A_init,
         topk=20,
-        hidden_dim=512
+        hidden_dim=512,
+        predict_omegas=True,
     ):
         super().__init__()
         self.input_len = input_len
         self.out_len = out_len
-        self.M = M
-        self.K_eff = len(freq_indices)
         self.topk = topk
-    
+        self.M = len(omegas)
+        self.A_init = A_init
+        self.omegas = omegas.float()
         # Register buffers
-        self.register_buffer('omegas', torch.tensor(omegas, dtype=torch.float32, device=device))
-        self.register_buffer('freq_indices', freq_indices.to(device).long())
-        self.register_buffer('selected_omegas', omegas[freq_indices].to(device).float())
-
-        # Global amplitude model (stores full [T_total, M])
-        self.evolve_a = GlobalEvolveAOnSubband( device, init_A_full)
-
         # Predictor: history subband → future subband
         self.A_predictor = nn.Sequential(
-            nn.Linear(input_len , hidden_dim),
+            # nn.Linear(input_len , hidden_dim),
             # nn.Linear(2 * input_len * len(freq_indices), hidden_dim),
             # nn.Linear(input_len + 2 * len(freq_indices), hidden_dim),
             # nn.Linear(input_len + 2 * input_len * topk + topk*input_len, hidden_dim),
+            nn.Linear(2  * self.M, hidden_dim),
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 2 * out_len * len(freq_indices))
+            nn.Linear(hidden_dim, 2 * (input_len + out_len) * self.M)
         )
+        
+        # # zeor frequencies modeling
+        # self.zero_frequencies = nn.Sequential(
+        #     nn.Linear(input_len, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, input_len + out_len)
+        # )
 
-        print(f"[NeuralEvolutionarySpectra] Using {self.K_eff} / {M} frequency bins. "
-              f"A_delta shape: ({T_total}, {M})")
 
     def forward(self, X, t_index_in, t_index_out):
         """
@@ -108,46 +130,56 @@ class NeuralEvolutionarySpectra(nn.Module):
         B = X.shape[0]
         device = X.device
 
-        # --- Get historical amplitudes on selected frequencies ---
-        A_X_full = self.evolve_a(t_index_in)  # [B, input_len, K_eff]
-        t_in = t_index_in
+        t_fft_index = t_index_in[:, -1] # B, 1
 
-        topk_indices = self.freq_indices
+        STFT_init_complex = self.A_init[t_fft_index] # B, M clofat
+        STFT_init = torch.view_as_real(STFT_init_complex).reshape(B, -1)
+        # self.omegas = torch.fft.fftfreq(self.input_len).to(device)
+        # we don't use zero frequencies
+        # X_fft = torch.fft.fft(X - X.mean(dim=1, keepdim=True), self.input_len, dim=-1, norm="ortho") #  B, input_len
+        # X_fft[0] = 0 # we don't use zero frequencies
+        # _, topk_indices = torch.topk(torch.abs(X_fft), k=self.topk, dim=1, largest=True)  # [B, K]
+        # selected_omegas = self.omegas[topk_indices] # [B, K]
+        # main_fft_spectra = torch.gather(X_fft, 1, topk_indices)
+        # predict_inp = torch.cat([X,  torch.view_as_real(main_fft_spectra).view(B,  -1), selected_omegas], dim=1) # [B, input_len + 2 * input_len * topk + topk]
 
+        # selected_omegas = self.omegas_predictor(selected_omegas).reshape(B, -1, self.topk) # B, O+T, K
+
+
+        # main_fft_spectra = X_fft[topk_indices]  # [B, K]
         # --- 2. Dynamic top-K frequency selection per batch ---
         # energy = torch.mean(torch.abs(A_X_full) ** 2, dim=1)  # [B, M]
         # energy_per_frame = torch.abs(A_X_full)  # [B, N, M]
         # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=2, largest=True)  # [B, N, K]
         # _, topk_indices = torch.topk(energy, k=self.topk, dim=1, largest=True)  # [B, K_eff]
         # topk_indices, _ = torch.sort(topk_indices, dim=2)  
-
-
+        A_all = torch.view_as_complex(self.A_predictor(STFT_init).view(B, self.input_len + self.out_len, self.M, 2))  # [B, 2 *( input_len + out_len )* K_eff]
+        all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, torch.arange(self.M - self.input_len + 1, self.M+self.out_len+1).to(device))  # [B, input_len]
         # Gather selected components
-        selected_omegas = self.omegas[topk_indices]  # [B, K_eff]
+        # selected_omegas = self.omegas[topk_indices]  # [B, K_eff]
         # A_X_sub = torch.gather(A_X_full, dim=2, index=topk_indices)  # [B, N, K]
-        A_X_sub = A_X_full[:, :, topk_indices]  # [B, N, K]
+        # A_X_sub = A_X_full[:, :, topk_indices]  # [B, N, K]
         # A_X_sub = torch.gather(A_X_full, 2, topk_indices.unsqueeze(1).expand(-1, self.input_len, -1))  # [B, input_len, K_eff]
         # Reconstruct history
-        X_rec = synthesize_signal_on_subband(A_X_sub, selected_omegas, self.M, t_in)  # [B, input_len]
+        # X_rec = synthesize_signal_on_subband(A_X_sub, selected_omegas, self.M, t_in)  # [B, input_len]
         # --- Predict future amplitudes on same frequencies ---
         # A_X_flat = torch.view_as_real(A_X_sub).view(B, -1)  # [B, 2 * input_len * K_eff]
-        A_X_flat =torch.view_as_real(A_X_sub[:, -1, :]).view(B, -1)  # [B, 2 * input_len * K_eff]
+        # A_X_flat =torch.view_as_real(A_X_sub[:, -1, :]).view(B, -1)  # [B, 2 * input_len * K_eff]
 
         # A_X_last_expanded = A_X_sub[:, -1:, :].expand(-1, self.out_len, -1)  # [B, out_len, K_eff]
 
 
         # Predict residual (real+imag)
-        predict_inp = torch.cat([X], dim=1) # [B, input_len + 2 * input_len * topk + topk]
-        residual_flat = self.A_predictor(predict_inp)  # [B, 2 * out_len * K_eff]
-        residual_complex = torch.view_as_complex(residual_flat.view(B, self.out_len, self.topk, 2).contiguous())
+        # residual_complex = torch.view_as_complex(residual_flat.view(B, self.out_len, self.topk, 2).contiguous())
 
         # Final prediction: base + residual
-        A_Y_sub =  residual_complex
+        # A_Y_sub =  residual_complex
         
         # Synthesize prediction
-        t_out = t_index_out
-        print(selected_omegas)
-        Y_pred = synthesize_signal_on_subband(A_Y_sub, selected_omegas, self.M, t_out)  # [B, out_len]
+        # t_out = t_index_out
+        # print(selected_omegas)
+        # import pdb;pdb.set_trace()
+        # Y_pred = synthesize_signal_on_subband(A_Y_sub, selected_omegas, self.M, t_out)  # [B, out_len]
 
 
         # # --- Assemble full-spectrum A for output (for analysis/debug) ---
@@ -161,7 +193,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         # A_Y_full[..., self.freq_indices] = A_Y_sub
 
         # Concatenate
-        out = torch.cat([X_rec, Y_pred], dim=1)           # [B, input_len + out_len]
-        A_all_out = torch.cat([A_X_sub, A_Y_sub], dim=1)  # [B, input_len+out_len, K]
+        # out = torch.cat([X_rec, Y_pred], dim=1)           # [B, input_len + out_len]
+        # A_all_out = torch.cat([A_X_sub, A_Y_sub], dim=1)  # [B, input_len+out_len, K]
 
-        return out, A_all_out
+        return all_rec, A_all 
