@@ -535,3 +535,140 @@ def get_initial_amplitude_right_stft_torch(
         return A_interp, omega, A_interp
     else:
         return A_interp, omega
+
+
+
+
+
+
+def get_initial_amplitude_right_onesided(
+        x,
+        n_fft=None,
+        device=None,
+        return_full_omegas=False,
+    ):
+    return get_initial_amplitude_right_stft_torch_full(
+        x,
+        n_fft=n_fft,
+        hop_length=1,          # enforce hop=1
+        fs=1.0,
+        window='boxcar',
+        return_stft=False,
+        device=device,
+        phase_remodulate=False,
+        center_zero=False,
+        onesided=True, 
+        return_full_omegas=return_full_omegas
+    )
+
+
+
+
+
+
+
+def get_initial_amplitude_right_stft_torch_full(
+    x,
+    n_fft=None,
+    hop_length=1,          # enforce hop=1
+    fs=1.0,
+    window='boxcar',
+    return_stft=False,
+    device=None,
+    phase_remodulate=False,
+    center_zero=False,
+    onesided=False,
+    return_full_omegas=False,
+):
+    assert x.ndim == 1, "Input x must be 1D"
+    T = x.shape[0]
+    dt = 1.0 / fs
+    dtype = x.dtype
+    if device is None:
+        device = x.device
+
+    if n_fft is None:
+        n_fft = min(256, T)
+    # assert hop_length == 1, "This function assumes hop_length=1 for causality and alignment."
+
+    # Left pad with (n_fft - 1) zeros so that frame starting at t in x_pad covers [t-n_fft+1, ..., t] in original x
+    pad_left = n_fft - 1
+    x_pad = F.pad(x, (pad_left, 0))  # shape: (T + n_fft - 1,)
+
+    # For hop=1, frame j = t corresponds to window ending at original time t
+    t_indices = torch.arange(T, device=device)
+    frame_indices = t_indices  # j = t
+
+    # No right padding needed: max frame index = T-1, and len(x_pad) = T + n_fft - 1 = (T-1) + n_fft
+
+    # --- Create window ---
+    if window == 'boxcar':
+        win = torch.ones(n_fft, dtype=dtype, device=device)
+    elif window == 'hann':
+        win = torch.hann_window(n_fft, periodic=True, dtype=dtype, device=device)
+    elif window == 'hamming':
+        win = torch.hamming_window(n_fft, periodic=True, dtype=dtype, device=device)
+    else:
+        raise ValueError(f"Unsupported window: {window}")
+
+    # --- STFT with center=False ---
+    Zxx = torch.stft(
+        x_pad,
+        n_fft=n_fft,
+        hop_length=1,
+        win_length=n_fft,
+        window=win,
+        center=False,
+        normalized=True,
+        onesided=onesided,
+        return_complex=True
+    )  # shape: (n_fft, n_frames), n_frames = T
+    
+    M = Zxx.shape[0]
+
+    # Reorder frequencies to [-π, π)
+    if center_zero:
+        Zxx = torch.fft.fftshift(Zxx, dim=0)  # now 0-freq in the middle (or left for even?)
+    A_complex = Zxx
+    A_interp = A_complex[:, frame_indices].t()  # (T, M)
+
+
+    if return_full_omegas or (not onesided):
+        freqs_hz = torch.fft.fftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+        if center_zero:
+            freqs_hz = torch.fft.fftshift(freqs_hz)
+    elif onesided:
+        freqs_hz = torch.fft.rfftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+    omega = 2 * torch.pi * freqs_hz  # (M,)
+
+
+    # # --- Frequency axis ---
+    # if onesided:
+    #     # Use rfftfreq for [0, fs/2]
+    #     freqs_hz = torch.fft.rfftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+    # else:
+    #     # Full spectrum [-fs/2, fs/2)
+    #     freqs_hz = torch.fft.fftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+    #     if center_zero:
+    #         freqs_hz = torch.fft.fftshift(freqs_hz)
+    
+
+
+
+
+    if phase_remodulate:
+        # t_start = t - (n_fft - 1)
+        t_start = t_indices - (n_fft - 1)  # (T,)
+        phase_factor = torch.exp(-1j * t_start.unsqueeze(1) * omega.unsqueeze(0))  # (T, M)
+        A_interp = A_interp * phase_factor
+
+    if return_stft:
+        return A_interp, omega, A_interp
+    else:
+        return A_interp, omega
+
+
+
+
+
+

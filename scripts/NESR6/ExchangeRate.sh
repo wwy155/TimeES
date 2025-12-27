@@ -1,5 +1,5 @@
 export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
-python3 ./src/experiments/NESR5.py \
+python3 ./src/experiments/NESR6.py \
     --dataset_type="ETTh1" \
     --batch_size=300 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \

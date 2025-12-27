@@ -97,7 +97,6 @@ class NeuralEvolutionarySpectra(nn.Module):
         
         # STFT_topk_unfilled = torch.zeros_like(STFT_init).scatter_(dim=1, index=topk_indices, src=torch.gather(STFT_init, 1, topk_indices))
         STFT_topk = torch.gather(STFT_init_complex, 1, topk_indices)  # [B, input_len, K_eff]
-
         # _, topk_indices = torch.topk(energy, k=self.topk, dim=1, largest=True)  # [B, K_eff]
         # topk_indices, _ = torch.sort(topk_indices, dim=2)  
         A_scale = self.A_scale_predictor(X).view(B, self.input_len + self.out_len, self.topk, 2)
@@ -110,7 +109,9 @@ class NeuralEvolutionarySpectra(nn.Module):
         out_real.scatter_(dim=2, index=topk_indices.unsqueeze(1).expand(-1, self.input_len+self.out_len, -1), src=A_half.real)
         out_imag.scatter_(dim=2, index=topk_indices.unsqueeze(1).expand(-1, self.input_len+self.out_len, -1), src=A_half.imag)
         A_half_all = torch.complex(out_real, out_imag)
-        
+        _, topk_indices1 = torch.topk( torch.abs(A_half_all) , k=self.topk, dim=2, largest=True)  # [B, K]
+        import pdb;pdb.set_trace()
+        print(topk_indices[0], topk_indices1[0])
         A_all = construct_hermitian_spectrum(A_half_all, self.input_len)
         all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, torch.arange(0, self.input_len + self.out_len).to(device))  # [B, input_len]
         # Gather selected components

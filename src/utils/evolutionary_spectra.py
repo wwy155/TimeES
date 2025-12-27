@@ -71,3 +71,42 @@ def synthesize_signal_on_subband(A_vals, selected_omegas, M, t_index):
                 torch.sum(integrand, dim=-1)
     # x_complex =  torch.sum(integrand, dim=-1)
     return x_complex.real
+
+
+
+def select_frequencies_by_energy_ratio(energy_per_bin, ratio=0.96):
+    """
+    Select the smallest set of frequency bins that contain at least `ratio` of total energy.
+    Bins are selected by descending energy (greedy optimal for L2 energy).
+    Returned indices are sorted in ascending order for indexing convenience.
+
+    Args:
+        energy_per_bin (Tensor): [M], non-negative energy per frequency bin
+        ratio (float): in (0, 1]
+
+    Returns:
+        freq_indices (LongTensor): selected frequency indices, sorted ascending
+    """
+    assert 0 < ratio <= 1.0
+    energy_per_bin = energy_per_bin.float()
+    total_energy = energy_per_bin.sum()
+
+    if total_energy == 0:
+        # All zero: return all or none? Usually return all to avoid empty.
+        return torch.arange(energy_per_bin.shape[0], device=energy_per_bin.device)
+    # Sort by energy descending
+    sorted_vals, sorted_idx = torch.sort(energy_per_bin, descending=True)
+
+    # Cumulative sum of top energies
+    cumsum = torch.cumsum(sorted_vals, dim=0)
+    threshold = ratio * total_energy
+
+    # Find minimal k such that cumsum[k-1] >= threshold
+    k = torch.searchsorted(cumsum, threshold, right=True).item() + 1
+    k = min(k, len(sorted_idx))  # safety
+
+    # Get top-k indices and sort them ascending (for consistent indexing)
+    selected_unsorted = sorted_idx[:k]
+    selected_sorted = torch.sort(selected_unsorted).values
+
+    return selected_sorted
