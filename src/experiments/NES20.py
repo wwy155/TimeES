@@ -35,9 +35,9 @@ from torch_timeseries.utils import asdict_exc
 import torch
 from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
-from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided, get_initial_amplitude_stft_torch
-from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio
-from src.models.nes19 import NeuralEvolutionarySpectra
+from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
+from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
+from src.models.nes20 import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
@@ -47,10 +47,11 @@ class NESParameters:
     M : int = 100
     energy_ratio:float = 0.9
     pickout_zero_freq : bool = False
-    t_emb : bool = True
+    t_emb : bool = False
+
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NES19+"
+    model_type: str = "NES20"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -58,21 +59,27 @@ class NESForecast(ForecastExp, NESParameters):
         #  A_init, omegas  = get_initial_amplitude_right_stft_torch is ok
 
 
-        A_train_init, _  = get_initial_amplitude_right_onesided(
-            torch.tensor(self.dataloader.train_dataset.scaled_data.squeeze()), 
+        A_train_init, _  = get_initial_amplitude_right_onesided_mv(
+            torch.tensor(self.dataloader.train_dataset.scaled_data).transpose(0, 1), 
             n_fft=self.M, 
-        )
-        energy_per_frame = torch.mean(torch.abs(A_train_init)**2, dim=0)  # [T, M] -> M
+        ) 
+        # A_train_init N, T, M
+
+
+
+        energy_per_frame = torch.mean(torch.abs(A_train_init)**2, dim=1)  # [T, M] -> M
         if self.energy_ratio == 1:
             selected_freqs = torch.arange(0, self.M//2 + 1)
         else:
-            selected_freqs = select_frequencies_by_energy_ratio(energy_per_frame, self.energy_ratio)
+            selected_freqs = select_frequencies_by_energy_ratio_batch(energy_per_frame, self.energy_ratio)
         print("selected_freqs:", selected_freqs)
-        A_init, omegas  = get_initial_amplitude_right_onesided(
-            torch.tensor(scaled_data.squeeze()), 
+
+        A_init, omegas  = get_initial_amplitude_right_onesided_mv(
+            torch.tensor(scaled_data).transpose(0, 1), 
             n_fft=self.M, 
             return_full_omegas=True,
         )
+
         A0_torch = torch.tensor(A_init).to(self.device).cfloat()
         # energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
         # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
@@ -80,14 +87,15 @@ class NESForecast(ForecastExp, NESParameters):
 
         self.model = NeuralEvolutionarySpectra(
             self.windows,
+            self.dataset.num_features,
             self.pred_len,
             self.device,
-            M=self.M,
             omegas=omegas,
+            M=self.M,
             A_init=A0_torch,
-            t_emb=self.t_emb,
-            selected_freqs=selected_freqs.to(self.device),
+            selected_freqs=selected_freqs,
             hidden_dim=self.hidden_dim,
+            t_emb=self.t_emb,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm,
             pickout_zero_freq=self.pickout_zero_freq,
@@ -117,9 +125,13 @@ class NESForecast(ForecastExp, NESParameters):
         y = torch.concat([batch_x, batch_y], dim=1)
         batch_x = batch_x.squeeze(-1)
         results, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
+        results = results.permute(0, 2, 1)
+        # results: B N T
+        # A: B N T M
+
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
         # return results, y.squeeze(2), A
-        return results, y.squeeze(2), A
+        return results, y, A[:, -1, :, :]
 
 
     def _process_one_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index, return_A=False):
@@ -140,12 +152,13 @@ class NESForecast(ForecastExp, NESParameters):
         # y_index = y_index.to(self.device).float().squeeze(-1) 
         # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
         # inp = inp.unsqueeze(-1)
-        batch_x = batch_x.squeeze(-1)
+        batch_x = batch_x
         results, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
+        results = results.permute(0, 2, 1)
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
         if return_A:
-            return results[:, -self.pred_len:], batch_y.squeeze(2), A
-        return results[:, -self.pred_len:], batch_y.squeeze(2)
+            return results[:, -self.pred_len:, :], batch_y, A[:, -1, :, :]
+        return results[:, -self.pred_len:, :], batch_y
 
 
 

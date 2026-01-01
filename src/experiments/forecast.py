@@ -154,7 +154,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
                     horizon=self.horizon,
                     steps=self.pred_len,
                     shuffle_train=True,
-                    freq=self.dataset.freq,
+                    freq='h',
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                 )
@@ -166,7 +166,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
                     horizon=self.horizon,
                     steps=self.pred_len,
                     shuffle_train=True,
-                    freq=self.dataset.freq,
+                    freq='h',
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                 )
@@ -179,7 +179,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
                 steps=self.pred_len,
                 scale_in_train=True,
                 shuffle_train=True,
-                freq=self.dataset.freq,
+                freq='h',
                 batch_size=self.batch_size,
                 train_ratio=self.train_ratio,
                 test_ratio=self.test_ratio,

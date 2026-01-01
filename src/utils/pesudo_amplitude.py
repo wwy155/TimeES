@@ -555,7 +555,25 @@ def get_initial_amplitude_right_onesided(
         window='boxcar',
         return_stft=False,
         device=device,
-        phase_remodulate=False,
+        center_zero=False,
+        onesided=True, 
+        return_full_omegas=return_full_omegas
+    )
+
+def get_initial_amplitude_right_onesided_mv(
+        x,
+        n_fft=None,
+        device=None,
+        return_full_omegas=False,
+    ):
+    return get_initial_amplitude_right_stft_torch_mv(
+        x,
+        n_fft=n_fft,
+        hop_length=1,          # enforce hop=1
+        fs=1.0,
+        window='boxcar',
+        return_stft=False,
+        device=device,
         center_zero=False,
         onesided=True, 
         return_full_omegas=return_full_omegas
@@ -575,7 +593,6 @@ def get_initial_amplitude_right_stft_torch_full(
     window='boxcar',
     return_stft=False,
     device=None,
-    phase_remodulate=False,
     center_zero=False,
     onesided=False,
     return_full_omegas=False,
@@ -642,25 +659,6 @@ def get_initial_amplitude_right_stft_torch_full(
     omega = 2 * torch.pi * freqs_hz  # (M,)
 
 
-    # # --- Frequency axis ---
-    # if onesided:
-    #     # Use rfftfreq for [0, fs/2]
-    #     freqs_hz = torch.fft.rfftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
-    # else:
-    #     # Full spectrum [-fs/2, fs/2)
-    #     freqs_hz = torch.fft.fftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
-    #     if center_zero:
-    #         freqs_hz = torch.fft.fftshift(freqs_hz)
-    
-
-
-
-
-    if phase_remodulate:
-        # t_start = t - (n_fft - 1)
-        t_start = t_indices - (n_fft - 1)  # (T,)
-        phase_factor = torch.exp(-1j * t_start.unsqueeze(1) * omega.unsqueeze(0))  # (T, M)
-        A_interp = A_interp * phase_factor
 
     if return_stft:
         return A_interp, omega, A_interp
@@ -672,3 +670,93 @@ def get_initial_amplitude_right_stft_torch_full(
 
 
 
+
+
+
+def get_initial_amplitude_right_stft_torch_mv(
+    x,
+    n_fft=None,
+    hop_length=1,          # enforce hop=1
+    fs=1.0,
+    window='boxcar',
+    return_stft=False,
+    device=None,
+    center_zero=False,
+    onesided=False,
+    return_full_omegas=False,
+):
+    # Support both (T,) and (N, T)
+    if x.ndim == 1:
+        x = x.unsqueeze(0)  # (1, T)
+        was_1d = True
+    elif x.ndim == 2:
+        was_1d = False
+    else:
+        raise ValueError(f"Input x must be 1D or 2D, got shape {x.shape}")
+
+    N, T = x.shape
+    dt = 1.0 / fs
+    dtype = x.dtype
+    if device is None:
+        device = x.device
+    x = x.to(device)
+
+    if n_fft is None:
+        n_fft = min(256, T)
+
+    # Left pad each sequence with (n_fft - 1) zeros
+    pad_left = n_fft - 1
+    x_pad = F.pad(x, (pad_left, 0))  # (N, T + n_fft - 1)
+
+    # Create window
+    if window == 'boxcar':
+        win = torch.ones(n_fft, dtype=dtype, device=device)
+    elif window == 'hann':
+        win = torch.hann_window(n_fft, periodic=True, dtype=dtype, device=device)
+    elif window == 'hamming':
+        win = torch.hamming_window(n_fft, periodic=True, dtype=dtype, device=device)
+    else:
+        raise ValueError(f"Unsupported window: {window}")
+
+    # Compute STFT over batch
+    Zxx = torch.stft(
+        x_pad,
+        n_fft=n_fft,
+        hop_length=1,
+        win_length=n_fft,
+        window=win,
+        center=False,
+        normalized=True,
+        onesided=onesided,
+        return_complex=True
+    )  # Shape: (N, freq_bins, n_frames), where n_frames = T
+
+    M = Zxx.shape[1]  # number of frequency bins
+
+    # Optional: shift zero frequency to center
+    if center_zero:
+        Zxx = torch.fft.fftshift(Zxx, dim=1)  # shift along freq axis (dim=1)
+
+    # Transpose to (N, T, M)
+    A_interp = Zxx.permute(0, 2, 1)  # (N, T, M)
+
+    # Frequency axis
+    if return_full_omegas or (not onesided):
+        freqs_hz = torch.fft.fftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+        if center_zero:
+            freqs_hz = torch.fft.fftshift(freqs_hz)
+    else:  # onesided and not return_full_omegas
+        freqs_hz = torch.fft.rfftfreq(n_fft, d=dt).to(device=device, dtype=dtype)
+
+    omega = 2 * torch.pi * freqs_hz  # (M,)
+
+    if return_stft:
+        out = (A_interp, omega, A_interp)
+    else:
+        out = (A_interp, omega)
+
+    # If input was 1D, squeeze batch dim in output for backward compatibility
+    if was_1d:
+        out = (out[0].squeeze(0), out[1]) + (out[2].squeeze(0),) if return_stft else (out[0].squeeze(0), out[1])
+
+    return out

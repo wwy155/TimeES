@@ -110,3 +110,51 @@ def select_frequencies_by_energy_ratio(energy_per_bin, ratio=0.96):
     selected_sorted = torch.sort(selected_unsorted).values
 
     return selected_sorted
+
+
+
+def select_frequencies_by_energy_ratio_batch(energy_per_bin, ratio=0.96):
+    """
+    Select frequency bins for each variable independently based on energy ratio.
+
+    Args:
+        energy_per_bin (Tensor): [N, M], non-negative energy per bin for N variables
+        ratio (float): in (0, 1]
+
+    Returns:
+        selected_indices (List[LongTensor]): length N, each element is sorted indices for that variable
+    """
+    assert energy_per_bin.ndim == 2, f"Expected (N, M), got {energy_per_bin.shape}"
+    assert 0 < ratio <= 1.0
+
+    N, M = energy_per_bin.shape
+    device = energy_per_bin.device
+    energy_per_bin = energy_per_bin.float()
+
+    total_energies = energy_per_bin.sum(dim=1)  # (N,)
+    selected_indices = []
+
+    for i in range(N):
+        e = energy_per_bin[i]  # (M,)
+        total_e = total_energies[i]
+
+        if total_e == 0:
+            # All zero: select all frequencies to avoid empty set
+            idx = torch.arange(M, device=device)
+        else:
+            # Sort by energy descending
+            sorted_vals, sorted_idx = torch.sort(e, descending=True)
+            cumsum = torch.cumsum(sorted_vals, dim=0)
+            threshold = ratio * total_e
+
+            # Find minimal k such that cumsum[k-1] >= threshold
+            # torch.searchsorted works on 1D sorted array
+            k = torch.searchsorted(cumsum, threshold, right=True).item() + 1
+            k = min(k, M)
+
+            top_k_unsorted = sorted_idx[:k]
+            idx = torch.sort(top_k_unsorted).values  # ascending order
+
+        selected_indices.append(idx)
+
+    return selected_indices
