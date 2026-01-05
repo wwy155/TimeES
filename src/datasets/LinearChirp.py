@@ -20,33 +20,26 @@ class LinearChirp(TimeSeriesDataset):
     name: str = 'LinearChirp'
     num_features:int = 1
     sample_rate:int = 1
-    length : int= 2000
+    length : int= 1000
     freq: str = 't'
     
     def download(self): 
         pass
-    
-
+        
     def _load(self):
-        # n = 400
-        # Generating date series
+        dt = 0.01 
+        N = self.length
+        t = np.arange(N)*dt 
+        
+        f0 = 6  
+        f1 = 1   
 
-        fs = 1000          # 采样频率 (Hz)
-        T = 2.0            # 信号总时长 (秒)
-        t = np.linspace(0, T, int(fs * T), endpoint=False)
-        f0 = 10
+        x = chirp(t, f0=f0, f1=f1, t1=dt*N, method='hyperbolic')
+        x = x.reshape(-1, 1)  # (N, 1)
 
-        f0 = 10            # 起始频率 (Hz)
-        f1 = 50           # 结束频率 (Hz)
-        method = 'linear'  # 调频方式：'linear', 'quadratic', 'logarithmic', 'hyperbolic'
-
-        x = chirp(t, f0=f0, f1=f1, t1=T, method=method, phi=0)
-        dates = pd.date_range(start='2022-01-01', periods= len(t), freq='t')
-
-        # Creating DataFrame with specified column names
-        self.df = pd.DataFrame(x, columns=[ f"data{i}" for i in range(self.num_features)])
-        self.df['date'] = dates
-        self.dates =  pd.DataFrame({'date': dates})
+        dates = pd.date_range(start='2022-01-01', periods=N, freq='t')
+        self.df = pd.DataFrame(x, columns=[f"data{i}" for i in range(self.num_features)])
+        self.df['date'] =  dates
+        self.dates = pd.DataFrame({'date': dates})
         self.data = self.df.drop('date', axis=1).values
         return self.data
-

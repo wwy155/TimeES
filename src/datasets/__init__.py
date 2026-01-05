@@ -1,3 +1,4 @@
+from .SimFreq import SimFreq
 from .SimFreq5 import SimFreq5
 from .SimFreq3 import SimFreq3
 from .SimFreq3F import SimFreq3F

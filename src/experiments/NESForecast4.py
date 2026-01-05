@@ -37,7 +37,7 @@ from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.nesforecast2 import NeuralEvolutionarySpectra
+from src.models.nesforecast4 import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
@@ -51,7 +51,7 @@ class NESParameters:
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NESForecast2"
+    model_type: str = "NESForecast4"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -80,7 +80,7 @@ class NESForecast(ForecastExp, NESParameters):
             return_full_omegas=True,
         )
 
-        A0_torch = torch.tensor(A_init).cfloat()
+        A0_torch = A_init.cfloat()	
         # energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
         # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
         

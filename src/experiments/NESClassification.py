@@ -34,76 +34,72 @@ from torch_timeseries.utils import asdict_exc
 
 import torch
 from src.experiments.forecast import ForecastExp
+from torch_timeseries.experiments import UEAClassificationExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.nesforecast2 import NeuralEvolutionarySpectra
+from src.models.NES import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
     hidden_dim : int = 512
     additive_scale : bool = True
     use_norm : bool = False
-    M : int = 96
     energy_ratio:float = 0.9
     pickout_zero_freq : bool = False
     t_emb : bool = False
+    rec_X : bool = True
 
 @dataclass
-class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NESForecast2"
+class NESClassification(UEAClassificationExp, NESParameters):
+    model_type: str = "NESClassification"
+    windows : int = 336
+    pred_len : int = 336
+    patience : int = 10 
+    lr : float = 0.0001
 
+
+    
     def _init_model(self):
-        scaled_data = self.scaler.transform(self.dataset.data)
-        #  A_init, omegas  = get_initial_amplitude_stft_torch( this will lead to label leak
-        #  A_init, omegas  = get_initial_amplitude_right_stft_torch is ok
 
-
-        A_train_init, _  = get_initial_amplitude_right_onesided_mv(
-            torch.tensor(self.dataloader.train_dataset.scaled_data).transpose(0, 1), 
-            n_fft=self.M, 
-        ) 
-        # A_train_init N, T, M
-
-
-
-        energy_per_frame = torch.mean(torch.abs(A_train_init)**2, dim=1)  # [T, M] -> M
-        if self.energy_ratio == 1:
-            selected_freqs = [torch.arange(0, self.M//2 + 1)]
-        else:
-            selected_freqs = select_frequencies_by_energy_ratio_batch(energy_per_frame, self.energy_ratio)
-        print("selected_freqs:", selected_freqs)
-
-        A_init, omegas  = get_initial_amplitude_right_onesided_mv(
-            torch.tensor(scaled_data).transpose(0, 1), 
-            n_fft=self.M, 
-            return_full_omegas=True,
-        )
-
-        A0_torch = torch.tensor(A_init).cfloat()
-        # energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
-        # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
-        
-
+        selected_freqs = self.select_frequency()
         self.model = NeuralEvolutionarySpectra(
             self.windows,
             self.dataset.num_features,
-            self.pred_len,
+            self.windows,
             self.device,
-            omegas=omegas,
-            M=self.M,
-            A_init=A0_torch,
+            omegas=torch.fft.fftfreq(self.windows).to(self.device),
+            M=self.windows,
+            A_init=None,
             selected_freqs=selected_freqs,
             hidden_dim=self.hidden_dim,
             t_emb=self.t_emb,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm,
             pickout_zero_freq=self.pickout_zero_freq,
+            task='classification',
+            out_prob=self.dataset.num_classes,
         )        
         self.model = self.model.to(self.device)
 
 
-    def _process_train_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
+    def select_frequency(self):
+        all_x = []
+        for i, (scaled_x, x, y, padding_masks) in enumerate(self.train_loader):
+            all_x.append(x)
+        X = torch.concat(all_x, dim=0)
+        X = X.permute(2, 0, 1)
+        STFT_init_complex = torch.fft.rfft(X, norm="ortho").cfloat() # B, T, M
+        energy_per_frame = torch.mean(torch.abs(STFT_init_complex)**2, dim=1)  # [T, M] -> M
+        if self.energy_ratio == 1:
+            selected_freqs = [torch.arange(0, self.windows//2 + 1)]
+        else:
+            selected_freqs = select_frequencies_by_energy_ratio_batch(energy_per_frame, self.energy_ratio)
+        print("selected_freqs:", selected_freqs)
+        return selected_freqs
+
+
+    def _process_train_batch(self, scaled_x, x, y, padding_masks):
         # inputs:
         # batch_x: (B, T, N)
         # batch_y: (B, O, N)
@@ -111,199 +107,59 @@ class NESForecast(ForecastExp, NESParameters):
         # - pred: (B, N)/(B, O, N)
         # - label: (B, N)/(B, O, N)
 
-        batch_x = batch_x.to(self.device, dtype=torch.float32)
-        batch_y = batch_y.to(self.device, dtype=torch.float32)
-
-        x_index = x_index.to(self.device, dtype=torch.int)
-        y_index = y_index.to(self.device, dtype=torch.int)
-        batch_x_date_enc = batch_x_date_enc.to(self.device).float()
-        batch_y_date_enc = batch_y_date_enc.to(self.device).float()
-        # x_index = x_index.to(self.device).float().squeeze(-1) 
-        # y_index = y_index.to(self.device).float().squeeze(-1) 
-        # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
-        # inp = inp.unsqueeze(-1)
-        # y = torch.concat([batch_x, batch_y], dim=1)
-        results, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
-        results = results.permute(0, 2, 1)
-        # results: B N T
-        # A: B N T M
-
-        # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
-        # return results, y.squeeze(2), A
-        return results[:, -self.pred_len:, :], batch_y, A[:, -1, :, :]
+        outputs, rec, A = self.model(scaled_x, rec=True, return_A=True) # [H]
+        return outputs, rec, A, y.long().squeeze(-1)
 
 
-    def _process_one_batch(self, batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index, return_A=False):
-        # inputs:
-        # batch_x: (B, T, N)
-        # batch_y: (B, O, N)
-        # ouputs:
-        # - pred: (B, N)/(B, O, N)
-        # - label: (B, N)/(B, O, N)
+    def _process_one_batch(self, batch_x, origin_x, batch_y, padding_masks):
 
         batch_x = batch_x.to(self.device, dtype=torch.float32)
         batch_y = batch_y.to(self.device, dtype=torch.float32)
-        x_index = x_index.to(self.device, dtype=torch.int)
-        y_index = y_index.to(self.device, dtype=torch.int)
-        batch_x_date_enc = batch_x_date_enc.to(self.device).float()
-        batch_y_date_enc = batch_y_date_enc.to(self.device).float()
-        # x_index = x_index.to(self.device).float().squeeze(-1) 
-        # y_index = y_index.to(self.device).float().squeeze(-1) 
-        # inp = torch.concat([x_index, y_index], dim=-1).reshape(-1) # B*[L + P]
-        # inp = inp.unsqueeze(-1)
-        batch_x = batch_x
-        results, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
-        results = results.permute(0, 2, 1)
-        # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
-        if return_A:
-            return results[:, -self.pred_len:, :], batch_y, A[:, -1, :, :]
-        return results[:, -self.pred_len:, :], batch_y
 
+        outputs = self.model(batch_x)  # torch.Size([batch_size, output_length, num_nodes])
+
+        return outputs, batch_y.long().squeeze(-1)
 
 
     def _train(self):
         with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
             self.model.train()
             train_loss = []
-            for i, (
-                batch_x,
-                batch_y,
-                origin_x,
-                origin_y,
-                batch_x_date_enc,
-                batch_y_date_enc,
-                x_index,
-                y_index
-            ) in enumerate(self.train_loader):
-                start = time.time()
-                origin_y = origin_y.to(self.device)
-                self.model_optim.zero_grad()
-                pred, true, A = self._process_train_batch(
-                    batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
+            for i, (scaled_x, x, y, padding_masks) in enumerate(self.train_loader):
+                self.optimizer.zero_grad()
+
+                scaled_x = scaled_x.to(self.device, dtype=torch.float32)
+                x = x.to(self.device, dtype=torch.float32)
+                y = y.to(self.device, dtype=torch.float32)
+
+
+                pred, rec, A,  true = self._process_train_batch(
+                    scaled_x, x, y, padding_masks
                 )
-                loss = self.loss_func(pred, true)
-                # print(self.loss_func(pred, true), spectral_entropy_loss(A))
+                if self.rec_X:
+                    loss = self.loss_func(pred, true) + torch.mean((rec - scaled_x)**2)
+                else:
+                    loss = self.loss_func(pred, true) 
+
                 loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
                 )
-                progress_bar.update(batch_x.size(0))
+                progress_bar.update(scaled_x.size(0))
                 train_loss.append(loss.item())
                 progress_bar.set_postfix(
                     loss=loss.item(),
-                    lr=self.model_optim.param_groups[0]["lr"],
+                    lr=self.optimizer.param_groups[0]["lr"],
                     epoch=self.current_epoch,
                     refresh=True,
                 )
-                self.model_optim.step()
+                self.optimizer.step()
 
             return train_loss
 
 
-    def _init_data_loader(self):
-        
-        self._init_dataset()
-        
-        self.scaler = parse_type(self.scaler_type, globals=globals())()
-        if self.dataset_type[0:3] == "ETT":
-            if self.dataset_type[0:4] == "ETTh":
-                self.dataloader = ETTHLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq='h',
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
-                    time_index=True,
-                    fast_train=False,
-                    fast_test=False,
-                    fast_val=False,
 
-                )
-            elif  self.dataset_type[0:4] == "ETTm":
-                self.dataloader = ETTMLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq='h',
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
-                    time_index=True,
-                    fast_train=False,
-                    fast_test=False,
-                    fast_val=False,
-            )
-        else:
-            self.dataloader = SlidingWindowTS(
-                self.dataset,
-                self.scaler,
-                window=self.windows,
-                horizon=self.horizon,
-                steps=self.pred_len,
-                scale_in_train=True,
-                shuffle_train=True,
-                freq='h',
-                batch_size=self.batch_size,
-                train_ratio=self.train_ratio,
-                test_ratio=self.test_ratio,
-                num_worker=self.num_worker,
-                time_enc=0,
-                time_index=True,
-                fast_train=False,
-                fast_test=False,
-                fast_val=False,
-            )
-        self.train_loader, self.val_loader, self.test_loader = (
-            self.dataloader.train_loader,
-            self.dataloader.val_loader,
-            self.dataloader.test_loader,
-        )
-        self.train_steps = len(self.train_loader.dataset)
-        self.val_steps = len(self.val_loader.dataset)
-        self.test_steps = len(self.test_loader.dataset)
-
-        print(f"train steps: {self.train_steps}")
-        print(f"val steps: {self.val_steps}")
-        print(f"test steps: {self.test_steps}")
-
-
-    def _evaluate(self, dataloader):
-        self.model.eval()
-        self.metrics.reset()
-
-        with torch.no_grad():
-            with tqdm(total=len(dataloader.dataset)) as progress_bar:
-                for (
-                    batch_x,
-                    batch_y,
-                    origin_x,
-                    origin_y,
-                    batch_x_date_enc,
-                    batch_y_date_enc,
-                    x_index,
-                    y_index
-                ) in dataloader:
-                    start = time.time()
-                    origin_y = origin_y.to(self.device)
-                    self.model_optim.zero_grad()
-                    preds, truths = self._process_one_batch(
-                        batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
-                    )
-                    self.metrics.update(preds.contiguous(), truths.contiguous())
-
-                    progress_bar.update(batch_x.shape[0])
-
-            result = {
-                name: float(metric.compute()) for name, metric in self.metrics.items()
-            }
-        return result
         
     def plot(self):
         # full_dataset = MultivariateFast(
@@ -475,9 +331,9 @@ class NESForecast(ForecastExp, NESParameters):
 
 
 
-    def _test(self):
-        self.plot()
-        return super(NESForecast, self)._test()
+    # def _test(self):
+    #     self.plot()
+    #     return super(NESForecast, self)._test()
         
 
 
@@ -492,4 +348,4 @@ class NESForecast(ForecastExp, NESParameters):
 
 if __name__ == "__main__":
     import fire
-    fire.Fire(NESForecast)
+    fire.Fire(NESClassification)

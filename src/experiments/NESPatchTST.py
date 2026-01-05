@@ -37,21 +37,21 @@ from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.nesforecast2 import NeuralEvolutionarySpectra
+from src.models.nesformer import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
-    hidden_dim : int = 512
+    hidden_dim : int = 1024
     additive_scale : bool = True
     use_norm : bool = False
     M : int = 96
-    energy_ratio:float = 0.9
+    energy_ratio:float = 0.8
     pickout_zero_freq : bool = False
-    t_emb : bool = False
+    t_emb : bool = True
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NESForecast2"
+    model_type: str = "NESPatchTST"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -379,7 +379,7 @@ class NESForecast(ForecastExp, NESParameters):
         # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
 
         # instance
-        if not self.columns or len(self.columns) >1:
+        if not self.columns or len(self.columns) > 1:
             last_n = 9
             n = min(all_batch_x.shape[2], 10)
             fig, axes = plt.subplots(n)
