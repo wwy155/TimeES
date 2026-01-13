@@ -1,5 +1,5 @@
 # import codecs
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 import datetime
 import hashlib
 import json
@@ -7,7 +7,6 @@ import os
 import random
 import time
 from typing import Dict, List, Type, Union
-import matplotlib.pyplot as plt
 
 import numpy as np
 import pandas as pd
@@ -16,233 +15,104 @@ from torchmetrics import MeanAbsoluteError, MeanSquaredError, MetricCollection
 from tqdm import tqdm
 from torch.nn import MSELoss, L1Loss
 from torch.optim import *
-from torch_timeseries.dataloader.wrapper import MultiStepTimeFeatureSet, MultivariateFast
 from torch_timeseries.dataset import *
-from torch_timeseries.scaler import *
 from src.datasets import *
+from torch_timeseries.scaler import *
+from src.metrics import CRPS, CRPSSum, QICE, PICP
+from src.metrics import ProbMAE, ProbMSE, ProbRMSE
+
 from torch_timeseries.utils.model_stats import count_parameters
 from torch_timeseries.utils.early_stop import EarlyStopping
 from torch_timeseries.utils.parse_type import parse_type
 from torch_timeseries.utils.reproduce import reproducible
 from torch_timeseries.core import TimeSeriesDataset, BaseIrrelevant, BaseRelevant
-from torch_timeseries.dataloader import SlidingWindowTS, SlidingWindowTimeIndex, ETTHLoader, ETTMLoader
+from torch_timeseries.dataloader import SlidingWindowTS, ETTHLoader, ETTMLoader
+from torch_timeseries.experiments import ForecastExp
 from torch_timeseries.utils import asdict_exc
+import torch.multiprocessing as mp
 
 try:
     import wandb
 except:
     print("Warning: wandb is not installed, some funtionality may not work.")
+
+
+
+def update_metrics(preds, truths, metrics):
+    """Function to update metrics in a separate process."""
+    metrics.update(preds, truths)
+
+
 @dataclass
-class ForecastSettings:
-    horizon: int = 1
-    windows: int = 336
-    pred_len: int = 96
-    train_ratio: float = 0.7
-    test_ratio: float = 0.2
-    
-@dataclass
-class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
+class ProbForecastExp(ForecastExp):
     loss_func_type : str = 'mse'
-    columns : List[int] = field(default_factory=lambda : [])
+    epochs : int = 10
     
-    def config_wandb(
-        self,
-        project: str,
-    ):
-        self.project = project
-        self.wandb = True
-        return self
-
-    def _init_wandb(
-        self,
-        project: str,
-        seed : int
-    ):
-        # TODO: add seeds config parameters
-        def convert_dict(dictionary):
-            converted_dict = {}
-            for key, value in dictionary.items():
-                converted_dict[f"config.{key}"] = value
-            return converted_dict
-        # check wether this experiment had runned and reported on wandb
-        api = wandb.Api()
-        dic = dict(self.result_related_configs)
-        dic.update({'seed': seed})
-        config_filter = convert_dict(dic)
-        runs = api.runs(path=project, filters=config_filter)
-        try:
-            for run in runs:
-                if run.state == "finished" or run.state == "running":
-                    print(f"seed-{seed} {self.model_type} {self.dataset_type} w{self.windows} p{self.pred_len}  Experiment already reported, quiting...")
-                    self.finished = True
-                    return False 
-        except:
-            pass
-        wandb.init(
-            mode="online",
-            project=project,
-            name=f"{self.model_type}-{self.dataset_type}-w{self.windows} p{self.pred_len}",
-            tags=[self.dataset_type, f"horizon-{self.horizon}", f"window-{self.windows}", f"pred-{self.pred_len}"],
-        )
-        wandb.config.update(asdict(self))
-        wandb.config.update({'seed': seed})
-        print(f" wandb config , running in config: {asdict(self)}")
-        return True
-    
-
-    def _init_optimizer(self):
-        self.model_optim = parse_type(self.optm_type, globals=globals())(
-            self.model.parameters(), lr=self.lr, weight_decay=self.l2_weight_decay
-        )
-        # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        #     self.model_optim, T_max=self.patience-1
-        # )
-
-    def _setup(self):
-        # init data loader
-        self._init_data_loader()
-
-        # init metrics
-        self._init_metrics()
-
-        # init loss function based on given loss func type
-        self._init_loss_func()
-
-        self.current_epochs = 0
-        self.current_run = 0
-
-        self.setuped = True
-
     def _init_metrics(self):
         self.metrics = MetricCollection(
             metrics={
-                "mse": MeanSquaredError(),
-                "mae": MeanAbsoluteError(),
+                "crps": CRPS(),
+                "crps_sum": CRPSSum(),
+                "qice": QICE(),
+                "picp": PICP(),
+                "mse": ProbMSE(),
+                "mae":ProbMAE(),
+                "rmse": ProbRMSE(),
             }
         )
-        self.metrics.to(self.device)
-
-    def _init_loss_func(self):
-        loss_func_map = {'mse': MSELoss, 'mae': L1Loss}
-        self.loss_func = parse_type(loss_func_map[self.loss_func_type], globals=globals())()
-
-    def _init_model(self):
-        NotImplementedError("not implemented!!!")
-
-    @property
-    def result_related_configs(self):
-        ident = asdict_exc(self, BaseIrrelevant)
-        return ident
+        self.metrics.to("cpu")
+        ctx = mp.get_context("spawn")  # Options: 'fork', 'spawn', 'forkserver'
+        self.task_pool = ctx.Pool(processes=32)
 
     def _init_dataset(self):
         self.dataset: TimeSeriesDataset = parse_type(self.dataset_type, globals())(
-            root=self.data_path, columns=self.columns
+            root=self.data_path
         )
-    
-    def _init_data_loader(self):
-        
-        self._init_dataset()
-        
-        self.scaler = parse_type(self.scaler_type, globals=globals())()
-        if self.dataset_type[0:3] == "ETT":
-            if self.dataset_type[0:4] == "ETTh":
-                self.dataloader = ETTHLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq=self.dataset.freq,
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
+
+    def _train(self):
+        with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
+            self.model.train()
+            train_loss = []
+            for i, (
+                batch_x,
+                batch_y,
+                origin_x,
+                origin_y,
+                batch_x_date_enc,
+                batch_y_date_enc,
+            ) in enumerate(self.train_loader):
+                origin_y = origin_y.to(self.device).float()
+                batch_x = batch_x.to(self.device).float()
+                batch_y = batch_y.to(self.device).float()
+                batch_x_date_enc = batch_x_date_enc.to(self.device).float()
+                batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+                self.model_optim.zero_grad()
+                pred, true = self._process_train_batch(
+                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
                 )
-            elif  self.dataset_type[0:4] == "ETTm":
-                self.dataloader = ETTMLoader(
-                    self.dataset,
-                    self.scaler,
-                    window=self.windows,
-                    horizon=self.horizon,
-                    steps=self.pred_len,
-                    shuffle_train=True,
-                    freq=self.dataset.freq,
-                    batch_size=self.batch_size,
-                    num_worker=self.num_worker,
+                if self.invtrans_loss:
+                    pred = self.scaler.inverse_transform(pred)
+                    true = origin_y
+                loss = self.loss_func(pred, true)
+                loss.backward()
+
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.max_grad_norm
                 )
-        else:
-            self.dataloader = SlidingWindowTS(
-                self.dataset,
-                self.scaler,
-                window=self.windows,
-                horizon=self.horizon,
-                steps=self.pred_len,
-                scale_in_train=True,
-                shuffle_train=True,
-                freq=self.dataset.freq,
-                batch_size=self.batch_size,
-                train_ratio=self.train_ratio,
-                test_ratio=self.test_ratio,
-                num_worker=self.num_worker,
-                time_enc=0
-            )
-        self.train_loader, self.val_loader, self.test_loader = (
-            self.dataloader.train_loader,
-            self.dataloader.val_loader,
-            self.dataloader.test_loader,
-        )
-        self.train_steps = len(self.train_loader.dataset)
-        self.val_steps = len(self.val_loader.dataset)
-        self.test_steps = len(self.test_loader.dataset)
+                
+                progress_bar.update(batch_x.size(0))
+                
+                train_loss.append(loss.item())
+                progress_bar.set_postfix(
+                    loss=loss.item(),
+                    lr=self.model_optim.param_groups[0]["lr"],
+                    epoch=self.current_epoch,
+                    refresh=True,
+                )
+                self.model_optim.step()
 
-        print(f"train steps: {self.train_steps}")
-        print(f"val steps: {self.val_steps}")
-        print(f"test steps: {self.test_steps}")
-
-    def _run_identifier(self, seed) -> str:
-        ident = self.result_related_configs
-        # ident["seed"] = seed
-        # only influence the evluation result, not included here
-        # ident['invtrans_loss'] = False
-        ident_md5 = hashlib.md5(
-            json.dumps(ident, sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        return f"{seed}-{str(ident_md5)}"
-
-    def _setup_run(self, seed):
-        # setup experiment  only once
-        if not hasattr(self, "setuped"):
-            self._setup()
-        # setup torch and numpy random seed
-        reproducible(seed)
-        # init model, optimizer and loss function
-        self._init_model()
-
-        self._init_optimizer()
-
-        self.current_epoch = 0
-        self.run_save_dir = os.path.join(
-            self.save_dir,
-            "runs",
-            self.model_type,
-            self.dataset_type,
-            f"w{self.windows}h{self.horizon}s{self.pred_len}",
-            self._run_identifier(seed),
-        )
-        self.run_checkpoint_filepath = os.path.join(
-            self.run_save_dir, "run_checkpoint.pth"
-        )
-        self._setup_early_stopper()
-        
-        
-    def _setup_early_stopper(self):
-        self.best_checkpoint_filepath = os.path.join(
-            self.run_save_dir, "best_model.pth"
-        )
-        self.early_stopper = EarlyStopping(
-            self.patience, verbose=True, path=self.best_checkpoint_filepath
-        )
-
-    def _process_one_batch(
+            return train_loss
+    def _process_train_batch(
         self,
         batch_x,
         batch_y,
@@ -264,42 +134,130 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         # for multiple steps you should output (B, O, N)
         raise NotImplementedError()
 
+    def _process_val_batch(
+        self,
+        batch_x,
+        batch_origin_x,
+        batch_x_date_enc,
+        batch_y_date_enc,
+    ):
+        # inputs:
+        # batch_x:  (B, T, N)
+        # batch_y:  (B, Steps,T)
+        # batch_x_date_enc:  (B, T, N)
+        # batch_y_date_enc:  (B, T, Steps)
+
+        # outputs:
+        # pred: (B, O, N)
+        # label:  (B,O,N)
+        # for single step you should output (B, N)
+        # for multiple steps you should output (B, O, N)
+        raise NotImplementedError()
+
+
+
+
     def _evaluate(self, dataloader):
         self.model.eval()
         self.metrics.reset()
+        results = []
+        with tqdm(total=len(dataloader.dataset)) as progress_bar:
+            for batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc in dataloader:
+                batch_size = batch_x.size(0)
+                origin_x = origin_x.to(self.device)
+                origin_y = origin_y.to(self.device)
+                batch_x = batch_x.to(self.device).float()
+                batch_y = batch_y.to(self.device).float()
+                batch_x_date_enc = batch_x_date_enc.to(self.device).float()
+                batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+                preds, truths = self._process_val_batch(
+                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
+                )
+                origin_y = origin_y.to(self.device)
+                if self.invtrans_loss:
+                    preds = self.scaler.inverse_transform(preds)
+                    truths = origin_y
+                    
+                # update_metrics(preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)
+                # if isinstance(preds, np.ndarray):
+                #     results.append(self.task_pool.apply_async(update_metrics, (preds, truths, self.metrics)))
+                # else:
+                results.append(self.task_pool.apply_async(update_metrics, (preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)))
+                
+                progress_bar.update(batch_x.shape[0])
 
-        with torch.no_grad():
-            with tqdm(total=len(dataloader.dataset)) as progress_bar:
-                for (
-                    batch_x,
-                    batch_y,
-                    batch_origin_x,
-                    batch_origin_y,
-                    batch_x_date_enc,
-                    batch_y_date_enc,
-                ) in dataloader:
-                    batch_size = batch_x.size(0)
-                    preds, truths = self._process_one_batch(
-                        batch_x, batch_y, batch_origin_x, batch_origin_y, batch_x_date_enc, batch_y_date_enc
-                    )
-                    batch_origin_y = batch_origin_y.to(self.device)
-                    if self.invtrans_loss:
-                        preds = self.scaler.inverse_transform(preds)
-                        truths = batch_origin_y
-                    if self.pred_len == 1:
-                        self.metrics.update(
-                            preds.contiguous().reshape(batch_size, -1),
-                            truths.contiguous().reshape(batch_size, -1),
-                        )
-                    else:
-                        self.metrics.update(preds.contiguous(), truths.contiguous())
+        for result in results:
+            result.get()  # Ensure the metric update is finished
 
-                    progress_bar.update(batch_x.shape[0])
-
-            result = {
-                name: float(metric.compute()) for name, metric in self.metrics.items()
-            }
+        result = {name: float(metric.compute()) for name, metric in self.metrics.items()}
         return result
+    
+    
+    def _init_data_loader(self, shuffle=True, fast_test=False, fast_val=True):
+        
+        self._init_dataset()
+        
+        self.scaler = parse_type(self.scaler_type, globals=globals())()
+        if self.dataset_type[0:3] == "ETT":
+            if self.dataset_type[0:4] == "ETTh":
+                self.dataloader = ETTHLoader(
+                    self.dataset,
+                    self.scaler,
+                    window=self.windows,
+                    horizon=self.horizon,
+                    steps=self.pred_len,
+                    shuffle_train=shuffle,
+                    freq=self.dataset.freq,
+                    batch_size=self.batch_size,
+                    num_worker=self.num_worker,
+                    fast_test=fast_test,
+                    fast_val=fast_val,
+                )
+            elif  self.dataset_type[0:4] == "ETTm":
+                self.dataloader = ETTMLoader(
+                    self.dataset,
+                    self.scaler,
+                    window=self.windows,
+                    horizon=self.horizon,
+                    steps=self.pred_len,
+                    shuffle_train=shuffle,
+                    freq=self.dataset.freq,
+                    batch_size=self.batch_size,
+                    num_worker=self.num_worker,
+                    fast_test=fast_test,
+                    fast_val=fast_val,
+                )
+        else:
+            self.dataloader = SlidingWindowTS(
+                self.dataset,
+                self.scaler,
+                window=self.windows,
+                horizon=self.horizon,
+                steps=self.pred_len,
+                scale_in_train=True,
+                shuffle_train=shuffle,
+                freq=self.dataset.freq,
+                batch_size=self.batch_size,
+                train_ratio=self.train_ratio,
+                test_ratio=self.test_ratio,
+                num_worker=self.num_worker,
+                fast_test=fast_test,
+                fast_val=fast_val,
+            )
+
+        self.train_loader, self.val_loader, self.test_loader = (
+            self.dataloader.train_loader,
+            self.dataloader.val_loader,
+            self.dataloader.test_loader,
+        )
+        self.train_steps = len(self.train_loader.dataset)
+        self.val_steps = len(self.val_loader.dataset)
+        self.test_steps = len(self.test_loader.dataset)
+
+        print(f"train steps: {self.train_steps}")
+        print(f"val steps: {self.val_steps}")
+        print(f"test steps: {self.test_steps}")
+        
 
     def _test(self) -> Dict[str, float]:
         print("Testing .... ")
@@ -319,47 +277,66 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
     def _val(self):
         print("Validating .... ")
         val_result = self._evaluate(self.val_loader)
+
+        # # log to wandb
+        # if self._use_wandb():
+        #     import wandb
+        #     result = {}
+        #     for name, metric_value in val_result.items():
+        #         wandb.run.summary["val_" + name] = metric_value
+        #         result["val_" + name] = metric_value
+        #     wandb.log(result, step=self.current_epoch)
+
         self._run_print(f"vali_results: {val_result}")
         return val_result
 
-    def _train(self):
-        with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
-            self.model.train()
-            train_loss = []
-            for i, (
-                batch_x,
-                batch_y,
-                origin_x,
-                origin_y,
-                batch_x_date_enc,
-                batch_y_date_enc,
-            ) in enumerate(self.train_loader):
-                start = time.time()
-                origin_y = origin_y.to(self.device)
-                self.model_optim.zero_grad()
-                pred, true = self._process_one_batch(
-                    batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc
-                )
-                if self.invtrans_loss:
-                    pred = self.scaler.inverse_transform(pred)
-                    true = origin_y
-                loss = self.loss_func(pred, true)
-                loss.backward()
+    # def _train(self):
+    #     with torch.enable_grad(), tqdm(total=len(self.train_loader.dataset)) as progress_bar:
+    #         self.model.train()
+    #         train_loss = []
+    #         for i, (
+    #             batch_x,
+    #             batch_y,
+    #             origin_x,
+    #             origin_y,
+    #             batch_x_date_enc,
+    #             batch_y_date_enc,
+    #         ) in enumerate(self.train_loader):
+    #             start = time.time()
+    #             origin_y = origin_y.to(self.device)
+    #             self.model_optim.zero_grad()
+                
+    #             origin_x = origin_x.to(self.device)
+    #             origin_y = origin_y.to(self.device)
+    #             batch_x = batch_x.to(self.device).float()
+    #             batch_y = batch_y.to(self.device).float()
+    #             batch_x_date_enc = batch_x_date_enc.to(self.device).float()
+    #             batch_y_date_enc = batch_y_date_enc.to(self.device).float()
 
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_grad_norm
-                )
-                progress_bar.update(batch_x.size(0))
-                train_loss.append(loss.item())
-                progress_bar.set_postfix(
-                    loss=loss.item(),
-                    lr=self.model_optim.param_groups[0]["lr"],
-                    epoch=self.current_epoch,
-                    refresh=True,
-                )
-                self.model_optim.step()
+                
+    #             pred, true = self._process_train_batch(
+    #                 batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
+    #             )
+    #             if self.invtrans_loss:
+    #                 pred = self.scaler.inverse_transform(pred)
+    #                 true = origin_y
+    #             loss = self.loss_func(pred, true)
+    #             loss.backward()
 
-            return train_loss
+    #             torch.nn.utils.clip_grad_norm_(
+    #                 self.model.parameters(), self.max_grad_norm
+    #             )
+    #             progress_bar.update(batch_x.size(0))
+    #             train_loss.append(loss.item())
+    #             progress_bar.set_postfix(
+    #                 loss=loss.item(),
+    #                 lr=self.model_optim.param_groups[0]["lr"],
+    #                 epoch=self.current_epoch,
+    #                 refresh=True,
+    #             )
+    #             self.model_optim.step()
+
+    #         return train_loss
 
     def _check_run_exist(self, seed: str):
         if not os.path.exists(self.run_save_dir):
@@ -407,7 +384,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         return hasattr(self, "wandb")
 
     def run(self, seed=42) -> Dict[str, float]:
-
+        
         if self._use_wandb() and not self._init_wandb(self.project, seed): return {}
         
         self._setup_run(seed)
@@ -423,7 +400,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         if self._use_wandb():
             wandb.run.summary["parameters"] = model_parameters_num
 
-        # for resumable reproducibility
+        # for resumable reproducibility_
         while self.current_epoch < self.epochs:
             epoch_start_time = time.time()
             if self.early_stopper.early_stop is True:
@@ -446,7 +423,7 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
             test_result = self._test()
 
             self.current_epoch = self.current_epoch + 1
-            self.early_stopper(val_result[self.loss_func_type], model=self.model)
+            self.early_stopper(val_result['crps'], model=self.model)
 
             self._save_run_check_point(seed)
 
@@ -464,6 +441,8 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
         
         if self._use_wandb():  wandb.finish()
         return best_test_result
+    
+    
 
     def runs(self, seeds: List[int] = [1, 2, 3, 4, 5]):
         results = []
@@ -476,8 +455,6 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
     def _save_run_check_point(self, seed):
         if not os.path.exists(self.run_save_dir):
             os.makedirs(self.run_save_dir)
-
-
         print(f"Saving run checkpoint to '{self.run_save_dir}'.")
 
         self.run_state = {
@@ -490,116 +467,3 @@ class ForecastExp(BaseRelevant, BaseIrrelevant, ForecastSettings):
 
         torch.save(self.run_state, f"{self.run_checkpoint_filepath}")
         print("Run state saved ... ")
-
-
-
-
-    def plot(self):
-        
-        full_dataset = MultiStepTimeFeatureSet(
-            self.dataset,
-            scaler=self.scaler,
-            time_enc=3,
-            window=self.windows,
-            horizon=self.horizon,
-            steps=self.pred_len,
-            freq=self.dataset.freq,
-            single_variate=False,
-            scaler_fit=False,
-            time_index=True,
-        )
-
-        all_batch_x = []
-        all_batch_x_date_enc = []
-        all_batch_y_date_enc = []
-        all_batch_y = []
-        
-        all_x_index = []
-        all_y_index = []
-        
-
-        for i in range(0, len(full_dataset), self.pred_len) :
-            batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index = full_dataset[i]
-            all_batch_x.append(torch.tensor(batch_x))
-            all_batch_y.append(torch.tensor(batch_y))
-            all_batch_x_date_enc.append(torch.tensor(batch_x_date_enc))
-            all_batch_y_date_enc.append(torch.tensor(batch_y_date_enc))
-            
-            all_x_index.append(torch.tensor(x_index))
-            all_y_index.append(torch.tensor(y_index))
-            
-        all_batch_x = torch.stack(all_batch_x, dim=0).to(self.device).float() 
-        all_batch_y = torch.stack(all_batch_y, dim=0).to(self.device).float() 
-        all_x_date_enc = torch.stack(all_batch_x_date_enc, dim=0).to(self.device).float() 
-        all_y_date_enc = torch.stack(all_batch_y_date_enc, dim=0).to(self.device).float()
-        all_x_index = torch.stack(all_x_index, dim=0).to(self.device).float()
-        all_y_index = torch.stack(all_y_index, dim=0).to(self.device).float()
-        # outs = self._val_batch(all_batch_x, all_x_date_enc, all_y_date_enc, all_x_index, all_y_index) # B, T, N
-        
-        outs, trues = self._process_one_batch(
-            all_batch_x, all_batch_y, None, None, all_x_date_enc, all_y_date_enc
-        )
-
-        # fig, axes = plt.subplots(all_batch_x.shape[2])
-        # for i in range(all_batch_x.shape[2]):
-        #     out = outs[:, :, i]
-        #     pred_all = out.reshape(-1).detach().cpu().numpy()
-        #     y_all = all_batch_y[:, :, i].reshape(-1).detach().cpu().numpy()
-        #     axes[i].plot(pred_all, label='pred')
-        #     axes[i].plot(y_all, label='y')
-            
-        # plt.legend()
-
-
-
-        # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
-
-
-
-        # instance
-        if len(self.columns) >1:
-            last_n = 9
-            n = min(all_batch_x.shape[2], 10)
-            fig, axes = plt.subplots(n)
-            for i in range(n):
-                out = outs[-last_n:, :, i]
-                pred_all = out.reshape(-1).detach().cpu().numpy()
-                y_all = all_batch_y[-last_n:, :, i].reshape(-1).detach().cpu().numpy()
-                axes[i].plot(pred_all, label='pred')
-                axes[i].plot(y_all, label='y')
-                plt.legend()
-                plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
-
-        else:
-            fig, axes = plt.subplots(1)
-            pred_all = outs.squeeze().reshape(-1).detach().cpu().numpy()
-            trues = trues.squeeze().reshape(-1).detach().cpu().numpy()
-        
-            axes.plot(pred_all, label='pred')
-            axes.plot(trues, label='y')
-            plt.legend()
-            plt.savefig(os.path.join(self.run_save_dir, 'global.png'))
-
-            fig, axes = plt.subplots(1)
-            axes.plot(pred_all[-2000:], label='pred')
-            axes.plot(trues[-2000:], label='y')
-            plt.legend()
-            plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
-
-
-
-        # # instance
-        # last_n = 9
-        # n = min(all_batch_x.shape[2], 10)
-        # fig, axes = plt.subplots(n)
-        # for i in range(n):
-        #     out = outs[-last_n:, :, i]
-        #     pred_all = out.reshape(-1).detach().cpu().numpy()
-        #     y_all = all_batch_y[-last_n:, :, i].reshape(-1).detach().cpu().numpy()
-        #     axes[i].plot(pred_all, label='pred')
-        #     axes[i].plot(y_all, label='y')
-            
-        # plt.legend()
-        # plt.savefig(os.path.join(self.run_save_dir, 'instance.png'))
-
-

@@ -37,21 +37,22 @@ from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.nesforecast4 import NeuralEvolutionarySpectra
+from src.models.NES import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
     hidden_dim : int = 512
     additive_scale : bool = False
+    layer_nums : int = 2
     use_norm : bool = False
     M : int = 96
     energy_ratio:float = 0.9
-    pickout_zero_freq : bool = False
     t_emb : bool = False
+    tc_emb : bool = False
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NESForecast4"
+    model_type: str = "NES"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -80,7 +81,7 @@ class NESForecast(ForecastExp, NESParameters):
             return_full_omegas=True,
         )
 
-        A0_torch = A_init.cfloat()	
+        A0_torch = torch.tensor(A_init).cfloat()
         # energy_per_frame = torch.mean(torch.abs(A0_torch), dim=0)  # [B, N, M]
         # _, topk_indices = torch.topk(energy_per_frame, k=self.topk, dim=0, largest=True)  # [B, N, K]
         
@@ -98,7 +99,7 @@ class NESForecast(ForecastExp, NESParameters):
             t_emb=self.t_emb,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm,
-            pickout_zero_freq=self.pickout_zero_freq,
+            layer_nums=self.layer_nums,
         )        
         self.model = self.model.to(self.device)
 
@@ -204,7 +205,9 @@ class NESForecast(ForecastExp, NESParameters):
     def _init_data_loader(self):
         
         self._init_dataset()
-        
+        embed = 'timeF'
+        timeenc = 0 if embed != 'timeF' else 1
+
         self.scaler = parse_type(self.scaler_type, globals=globals())()
         if self.dataset_type[0:3] == "ETT":
             if self.dataset_type[0:4] == "ETTh":
@@ -221,6 +224,7 @@ class NESForecast(ForecastExp, NESParameters):
                     time_index=True,
                     fast_train=False,
                     fast_test=False,
+                    time_enc=timeenc,
                     fast_val=False,
 
                 )
@@ -237,6 +241,7 @@ class NESForecast(ForecastExp, NESParameters):
                     num_worker=self.num_worker,
                     time_index=True,
                     fast_train=False,
+                    time_enc=timeenc,
                     fast_test=False,
                     fast_val=False,
             )
@@ -254,7 +259,7 @@ class NESForecast(ForecastExp, NESParameters):
                 train_ratio=self.train_ratio,
                 test_ratio=self.test_ratio,
                 num_worker=self.num_worker,
-                time_enc=0,
+                time_enc=timeenc,
                 time_index=True,
                 fast_train=False,
                 fast_test=False,

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from src.utils.evolutionary_spectra import construct_hermitian_spectrum, synthesize_signal_on_subband
-
+from src.utils.evolutionary_spectra import construct_hermitian_spectrum, synthesize_signal_on_subband, synthesize_per_timestep_from_half
+import math
 
 
 class TemporalEmbedding(nn.Module):
@@ -50,6 +50,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         additive_scale=True,
         use_norm=False,
         pickout_zero_freq=False,
+        fast_build=False,
     ):
         super().__init__()
         self.input_len = input_len
@@ -59,6 +60,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         # all_selected = torch.cat(selected_freqs).unique().sort().values.to(device)
         # print("all_selected:",  all_selected)
         self.selected_freqs = selected_freqs
+        self.fast_build = fast_build
 
         
         self.use_norm = use_norm
@@ -214,19 +216,21 @@ class NeuralEvolutionarySpectra(nn.Module):
 
 
 
-        # self build
-        # Build full Hermitian spectrum for all channels & time steps
-        A_all = construct_hermitian_spectrum(A_half_all, self.M)  # [B, N, out_len, M]
-        # Synthesize signal in one batched call
-        t_out = torch.arange(self.out_len, device=device).float()  # [out_len]
-        all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, t_out)  # [B, N, out_len]
-        all_rec = all_rec.reshape(B, self.c_in, -1)
-        A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
-
-        # build using torch.irfft
-            # all_rec = torch.fft.irfft(A_half_all, self.M, norm='ortho')  # [B, N, out_len, M]
-            # all_rec = all_rec.reshape(B, self.c_in, -1)
-        A_half_all = A_half_all.reshape(B, self.c_in, A_half_all.shape[-2], A_half_all.shape[-1] )
+        if self.fast_build:
+            # NOTE: sythesize faster and less memoery but less performance
+            all_rec = synthesize_per_timestep_from_half(A_half_all, self.M, self.device)
+            all_rec = all_rec.reshape(B, self.c_in, -1)
+            A_half_all = A_half_all.reshape(B, self.c_in, A_half_all.shape[-2], A_half_all.shape[-1] )
+        else:
+            # self build
+            # Build full Hermitian spectrum for all channels & time steps
+            A_all = construct_hermitian_spectrum(A_half_all, self.M)  # [B, N, out_len, M]
+            # Synthesize signal in one batched call
+            t_out = torch.arange(self.out_len, device=device).float()  # [out_len]
+            all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, t_out)  # [B, N, out_len]
+            all_rec = all_rec.reshape(B, self.c_in, -1)
+            A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
+        
         # De-normalize
         if self.use_norm:
             all_rec = all_rec * stdev + means

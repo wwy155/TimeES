@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
+import math
 
 def construct_hermitian_spectrum(A_half: torch.Tensor, M: int) -> torch.Tensor:
     r"""
@@ -158,3 +158,28 @@ def select_frequencies_by_energy_ratio_batch(energy_per_bin, ratio=0.96):
         selected_indices.append(idx)
 
     return selected_indices
+
+
+
+def synthesize_per_timestep_from_half(
+    A_half: torch.Tensor,   # [B, N, T, K]
+    M: int,
+    device=None
+):
+    B, N, T, K = A_half.shape
+    assert K == M // 2 + 1
+
+    t = torch.arange(T, device=device).float()      # [T]
+    omega = torch.fft.rfftfreq(M) * 2 * torch.pi           # [K]
+    omega = omega.to(device)
+    # Expand for broadcasting: [B, N, T, K] × [K, T] → need [B, N, T, K]
+    # Compute phase: omega[k] * t[tau] for each tau (output time) and k (freq)
+    # Note: for output time tau, we use t = tau
+    phase = omega.view(1, 1, 1, K) * t.view(1, 1, T, 1)    # [1,1,T,K]
+    basis = torch.exp(1j * phase)                          # [1,1,T,K]
+
+    # Element-wise multiply and sum over freq dim
+    signal_complex = torch.sum(A_half * basis, dim=-1)     # [B, N, T]
+    signal_real = torch.real(signal_complex) / math.sqrt(M)
+
+    return signal_real

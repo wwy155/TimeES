@@ -37,7 +37,7 @@ from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.nesforecast4 import NeuralEvolutionarySpectra
+from src.models.nesforecast2 import NeuralEvolutionarySpectra
 
 @dataclass
 class NESParameters:
@@ -45,13 +45,15 @@ class NESParameters:
     additive_scale : bool = False
     use_norm : bool = False
     M : int = 96
+    layer_nums  : int = 2
     energy_ratio:float = 0.9
     pickout_zero_freq : bool = False
     t_emb : bool = False
+    tc_emb : bool = True
 
 @dataclass
 class NESForecast(ForecastExp, NESParameters):
-    model_type: str = "NESForecast4"
+    model_type: str = "NESForecast6"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -96,6 +98,8 @@ class NESForecast(ForecastExp, NESParameters):
             selected_freqs=selected_freqs,
             hidden_dim=self.hidden_dim,
             t_emb=self.t_emb,
+            tc_emb=self.tc_emb,
+            layer_nums = self.layer_nums,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm,
             pickout_zero_freq=self.pickout_zero_freq,

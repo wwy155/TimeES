@@ -42,7 +42,7 @@ from src.models.nesforecast2 import NeuralEvolutionarySpectra
 @dataclass
 class NESParameters:
     hidden_dim : int = 512
-    additive_scale : bool = True
+    additive_scale : bool = False
     use_norm : bool = False
     M : int = 96
     energy_ratio:float = 0.9

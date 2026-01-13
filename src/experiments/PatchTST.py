@@ -14,8 +14,8 @@ from . import (
 @dataclass
 class PatchTSTParameters:
     d_model: int = 512
-    e_layers: int = 2
-    d_ff: int = 512  # out of memoery with d_ff = 2048
+    e_layers: int = 1
+    d_ff: int = 2048  # out of memoery with d_ff = 2048
     dropout: float = 0.0
     n_heads : int = 8
     patch_len : int = 16
