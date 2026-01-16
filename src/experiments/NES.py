@@ -66,8 +66,6 @@ class NESForecast(ForecastExp, NESParameters):
         ) 
         # A_train_init N, T, M
 
-
-
         energy_per_frame = torch.mean(torch.abs(A_train_init)**2, dim=1)  # [T, M] -> M
         if self.energy_ratio == 1:
             selected_freqs = [torch.arange(0, self.M//2 + 1)]
@@ -125,7 +123,7 @@ class NESForecast(ForecastExp, NESParameters):
         # inp = inp.unsqueeze(-1)
         # y = torch.concat([batch_x, batch_y], dim=1)
         results, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
-        results = results.permute(0, 2, 1)
+        results = results.permute(0, 2, 1) # 
         # results: B N T
         # A: B N T M
 
@@ -207,6 +205,8 @@ class NESForecast(ForecastExp, NESParameters):
         self._init_dataset()
         embed = 'timeF'
         timeenc = 0 if embed != 'timeF' else 1
+        if self.dataset_type == 'Traffic':
+            timeenc = 0
 
         self.scaler = parse_type(self.scaler_type, globals=globals())()
         if self.dataset_type[0:3] == "ETT":

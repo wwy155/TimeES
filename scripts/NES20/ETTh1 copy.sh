@@ -1,16 +1,15 @@
 export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
-python3 ./src/experiments/NES19.py \
-    --dataset_type="ExchangeRate" \
+python3 ./src/experiments/NES18.py \
+    --dataset_type="ETTh1" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
     --device="cuda:0" \
     --hidden_dim=512 \
     --columns="[0]" \
-    --windows=100 \
+    --windows=96 \
     --patience=5 \
+    --cut_off_K=3 \
     --lr=0.0001 \
-    --M=100 \
-    --energy_ratio=0.9 \
-    --time_embed=None \
-    --pred_len=100 \
-    runs  --seeds='[4334343]'
+    --M=1024 \
+    --pred_len=96 \
+    runs  --seeds='[6617735]'

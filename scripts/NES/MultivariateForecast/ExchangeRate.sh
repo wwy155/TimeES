@@ -1,0 +1,79 @@
+export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+python3 ./src/experiments/NES.py \
+    --dataset_type="ExchangeRate" \
+    --batch_size=32 \
+    --data_path="./data" \
+    --device="cuda:1" \
+    --hidden_dim=512 \
+    --additive_scale=False \
+    --windows=96 \
+    --device="cuda:1" \
+    --t_emb=False \
+    --use_norm=True \
+    --patience=5 \
+    --lr=0.0001 \
+    --M=96 \
+    --layer_nums=2 \
+    --energy_ratio=0.9 \
+    --pred_len=96 \
+    runs  --seeds='[1,2,3,4,5]'
+
+export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+python3 ./src/experiments/NES.py \
+    --dataset_type="ExchangeRate" \
+    --batch_size=32 \
+    --data_path="./data" \
+    --device="cuda:1" \
+    --hidden_dim=512 \
+    --additive_scale=False \
+    --windows=96 \
+    --device="cuda:1" \
+    --t_emb=False \
+    --use_norm=True \
+    --patience=5 \
+    --lr=0.0001 \
+    --M=96 \
+    --layer_nums=2 \
+    --energy_ratio=0.9 \
+    --pred_len=192 \
+    runs  --seeds='[1,2]'
+
+export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+python3 ./src/experiments/NES.py \
+    --dataset_type="ExchangeRate" \
+    --batch_size=32 \
+    --data_path="./data" \
+    --device="cuda:1" \
+    --hidden_dim=512 \
+    --additive_scale=False \
+    --windows=96 \
+    --device="cuda:1" \
+    --t_emb=False \
+    --use_norm=True \
+    --patience=5 \
+    --lr=0.0001 \
+    --M=96 \
+    --layer_nums=2 \
+    --energy_ratio=0.9 \
+    --pred_len=336 \
+    runs  --seeds='[1,2]'
+
+export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+python3 ./src/experiments/NES.py \
+    --dataset_type="ExchangeRate" \
+    --batch_size=32 \
+    --data_path="./data" \
+    --device="cuda:1" \
+    --hidden_dim=512 \
+    --additive_scale=False \
+    --windows=96 \
+    --device="cuda:1" \
+    --t_emb=False \
+    --use_norm=True \
+    --patience=5 \
+    --lr=0.0001 \
+    --M=96 \
+    --layer_nums=2 \
+    --energy_ratio=0.9 \
+    --pred_len=720 \
+    runs  --seeds='[1,2]'

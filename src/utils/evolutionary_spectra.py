@@ -51,9 +51,12 @@ def construct_hermitian_spectrum(A_half: torch.Tensor, M: int) -> torch.Tensor:
     return A_full
 
 
-def synthesize_signal_on_subband(A_vals, selected_omegas, M, t_index):
+def synthesize_signal_on_subband(A_vals, selected_omegas, M, t_index, W_k=1):
     """
     Synthesize real-valued signal from complex amplitudes on a subset of frequencies.
+    if W_k is None, then assume W_k = 1
+
+    W_k should be in shape [.., T, K]
     
     Args:
         A_vals: [..., T, K], complex64
@@ -66,7 +69,7 @@ def synthesize_signal_on_subband(A_vals, selected_omegas, M, t_index):
     device = A_vals.device
     phase = torch.exp(1j * torch.einsum('...t,...k->...tk', t_index.float(), selected_omegas.to(device)))
     # phase = torch.exp(1j * t_index.unsqueeze(-1) * selected_omegas)
-    integrand = A_vals * phase
+    integrand = A_vals * phase * W_k
     x_complex = (1.0 / torch.sqrt(torch.tensor(M, dtype=torch.float32, device=device))) * \
                 torch.sum(integrand, dim=-1)
     # x_complex =  torch.sum(integrand, dim=-1)

@@ -47,6 +47,7 @@ def update_metrics(preds, truths, metrics):
 class ProbForecastExp(ForecastExp):
     loss_func_type : str = 'mse'
     epochs : int = 10
+    num_worker :int = 0
     
     def _init_metrics(self):
         self.metrics = MetricCollection(
@@ -66,7 +67,7 @@ class ProbForecastExp(ForecastExp):
 
     def _init_dataset(self):
         self.dataset: TimeSeriesDataset = parse_type(self.dataset_type, globals())(
-            root=self.data_path
+            root=self.data_path, columns=self.columns
         )
 
     def _train(self):
@@ -80,15 +81,20 @@ class ProbForecastExp(ForecastExp):
                 origin_y,
                 batch_x_date_enc,
                 batch_y_date_enc,
+                x_index, 
+                y_index
             ) in enumerate(self.train_loader):
                 origin_y = origin_y.to(self.device).float()
                 batch_x = batch_x.to(self.device).float()
                 batch_y = batch_y.to(self.device).float()
                 batch_x_date_enc = batch_x_date_enc.to(self.device).float()
                 batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+                x_index = x_index.to(self.device, dtype=torch.int)
+                y_index = y_index.to(self.device, dtype=torch.int)
+
                 self.model_optim.zero_grad()
                 pred, true = self._process_train_batch(
-                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
+                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
                 )
                 if self.invtrans_loss:
                     pred = self.scaler.inverse_transform(pred)
@@ -161,42 +167,50 @@ class ProbForecastExp(ForecastExp):
         self.model.eval()
         self.metrics.reset()
         results = []
-        with tqdm(total=len(dataloader.dataset)) as progress_bar:
-            for batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc in dataloader:
-                batch_size = batch_x.size(0)
-                origin_x = origin_x.to(self.device)
-                origin_y = origin_y.to(self.device)
-                batch_x = batch_x.to(self.device).float()
-                batch_y = batch_y.to(self.device).float()
-                batch_x_date_enc = batch_x_date_enc.to(self.device).float()
-                batch_y_date_enc = batch_y_date_enc.to(self.device).float()
-                preds, truths = self._process_val_batch(
-                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
-                )
-                origin_y = origin_y.to(self.device)
-                if self.invtrans_loss:
-                    preds = self.scaler.inverse_transform(preds)
-                    truths = origin_y
-                    
-                # update_metrics(preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)
-                # if isinstance(preds, np.ndarray):
-                #     results.append(self.task_pool.apply_async(update_metrics, (preds, truths, self.metrics)))
-                # else:
-                results.append(self.task_pool.apply_async(update_metrics, (preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)))
-                
-                progress_bar.update(batch_x.shape[0])
+        with torch.no_grad():
+            with tqdm(total=len(dataloader.dataset)) as progress_bar:
+                for batch_x, batch_y, origin_x, origin_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index in dataloader:
+                    batch_size = batch_x.size(0)
+                    origin_x = origin_x.to(self.device)
+                    origin_y = origin_y.to(self.device)
+                    batch_x = batch_x.to(self.device).float()
+                    batch_y = batch_y.to(self.device).float()
+                    batch_x_date_enc = batch_x_date_enc.to(self.device).float()
+                    batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+                    x_index = x_index.to(self.device, dtype=torch.int)
+                    y_index = y_index.to(self.device, dtype=torch.int)
 
-        for result in results:
-            result.get()  # Ensure the metric update is finished
+
+                    preds, truths = self._process_val_batch(
+                        batch_x, batch_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
+                    )
+                    origin_y = origin_y.to(self.device)
+                    if self.invtrans_loss:
+                        preds = self.scaler.inverse_transform(preds)
+                        truths = origin_y
+                        
+                    # update_metrics(preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)
+                    # if isinstance(preds, np.ndarray):
+                    #     results.append(self.task_pool.apply_async(update_metrics, (preds, truths, self.metrics)))
+                    # else:
+                    results.append(self.task_pool.apply_async(update_metrics, (preds.contiguous().cpu().detach(), truths.contiguous().cpu().detach(), self.metrics)))
+                    
+                    progress_bar.update(batch_x.shape[0])
+
+            for result in results:
+                result.get()  # Ensure the metric update is finished
 
         result = {name: float(metric.compute()) for name, metric in self.metrics.items()}
         return result
     
     
-    def _init_data_loader(self, shuffle=True, fast_test=False, fast_val=True):
+    def _init_data_loader(self, shuffle=True, fast_test=True, fast_val=True):
         
         self._init_dataset()
         
+        embed = 'timeF'
+        timeenc = 0 if embed != 'timeF' else 1
+
         self.scaler = parse_type(self.scaler_type, globals=globals())()
         if self.dataset_type[0:3] == "ETT":
             if self.dataset_type[0:4] == "ETTh":
@@ -206,8 +220,10 @@ class ProbForecastExp(ForecastExp):
                     window=self.windows,
                     horizon=self.horizon,
                     steps=self.pred_len,
+                    freq='h',
+                    time_index=True,
+                    time_enc=timeenc,
                     shuffle_train=shuffle,
-                    freq=self.dataset.freq,
                     batch_size=self.batch_size,
                     num_worker=self.num_worker,
                     fast_test=fast_test,
@@ -219,10 +235,12 @@ class ProbForecastExp(ForecastExp):
                     self.scaler,
                     window=self.windows,
                     horizon=self.horizon,
+                    freq='h',
+                    time_index=True,
                     steps=self.pred_len,
                     shuffle_train=shuffle,
-                    freq=self.dataset.freq,
                     batch_size=self.batch_size,
+                    time_enc=timeenc,
                     num_worker=self.num_worker,
                     fast_test=fast_test,
                     fast_val=fast_val,
@@ -235,10 +253,12 @@ class ProbForecastExp(ForecastExp):
                 horizon=self.horizon,
                 steps=self.pred_len,
                 scale_in_train=True,
+                freq='h',
+                time_index=True,
                 shuffle_train=shuffle,
-                freq=self.dataset.freq,
                 batch_size=self.batch_size,
                 train_ratio=self.train_ratio,
+                time_enc=timeenc,
                 test_ratio=self.test_ratio,
                 num_worker=self.num_worker,
                 fast_test=fast_test,

@@ -1,16 +1,17 @@
 export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
-python3 ./src/experiments/NES19.py \
+python3 ./src/experiments/NESProbForecast.py \
     --dataset_type="ExchangeRate" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
-    --device="cuda:0" \
+    --device="cuda:2" \
     --hidden_dim=512 \
-    --columns="[0]" \
-    --windows=100 \
+    --windows=168 \
     --patience=5 \
-    --lr=0.0001 \
-    --M=100 \
+    --lr=0.001 \
+    --M=168 \
+    --use_norm=True \
+    --tc_emb=False \
+    --t_emb=False \
     --energy_ratio=0.9 \
-    --time_embed=None \
-    --pred_len=100 \
-    runs  --seeds='[4334343]'
+    --pred_len=192 \
+    runs  --seeds='[233332, 2,3,4,5]'

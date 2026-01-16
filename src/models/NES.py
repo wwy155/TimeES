@@ -51,6 +51,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         additive_scale=True,
         use_norm=True,
         layer_nums=2,
+        task='forecast'
     ):
         super().__init__()
         self.input_len = input_len
@@ -60,6 +61,9 @@ class NeuralEvolutionarySpectra(nn.Module):
         all_selected = torch.cat(selected_freqs).unique().sort().values.to(device)
         print("all_selected:",  all_selected)
         self.selected_freqs = selected_freqs
+
+
+        self.task = task
 
         
         self.use_norm = use_norm
@@ -104,47 +108,62 @@ class NeuralEvolutionarySpectra(nn.Module):
             *[nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU()) for _ in range(layer_nums - 1)],
             nn.Linear(hidden_dim, 2 * out_len * self.K)
         )
+
         self.additive_scale = additive_scale
 
 
+        if self.task == 'prob_forecast':
+            self.num_samples = 100
+            self.mini_sample_num = 1
+
+            self.W_mu_real = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)      # [M]
+            self.W_mu_imag = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)      # [M]
+            self.W_logvar_real = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)  # log(σ²)
+            self.W_logvar_imag = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)
 
 
-    def forward(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+            self.t_all = torch.arange(self.out_len, dtype=torch.float32, device=self.device)  # [T]
+            self.phase = torch.exp(1j * torch.outer(self.t_all, self.omegas))  # [T, M]
+
+
+
+    def sample_W(self, B, device, num_samples):
         """
-        Forward pass.
-
-        Args:
-            X: [B, input_len, N] — dummy input (for interface consistency; not used in computation)
-            t_index_in: [input_len] or [B, input_len], long
-            t_index_out: [out_len] or [B, out_len], long
-            x_mark: [B, T, TE], long
-
-        Returns:
-            out: [B, input_len + out_len], reconstructed + predicted signal
-            A_all_out: [B, input_len + out_len, M], full-spectrum amplitudes (complex)
+        Sample W: [num_samples, B, M] (complex)
+        Using reparameterization: W = μ + ε * σ, ε ~ N(0,1)
         """
+        # Expand to [num_samples, B, M]
+        mu_r = self.W_mu_real.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
+        mu_i = self.W_mu_imag.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
+        logvar_r = self.W_logvar_real.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
+        logvar_i = self.W_logvar_imag.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
+
+        std_r = torch.exp(0.5 * logvar_r)
+        std_i = torch.exp(0.5 * logvar_i)
+
+        eps_r = torch.randn_like(std_r, device=device)
+        eps_i = torch.randn_like(std_i, device=device)
+
+        W_real = mu_r + eps_r * std_r  # [num_samples, B, M*c_in]
+        W_imag = mu_i + eps_i * std_i  # [num_samples, B, M*c_in]
+
+        return torch.complex(W_real, W_imag)  # [num_samples, B, M*c_in]
+
+
+    def build_A(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
         B = X.shape[0]
         device = X.device
         raw_X = X
         X = X.permute(0, 2, 1)
         
-
-
-        if self.use_norm:
-            # Normalization from Non-stationary Transformer
-            means = X.mean(-1, keepdim=True).detach()
-            X = X - means
-            stdev = torch.sqrt(torch.var(X, dim=-1, keepdim=True, unbiased=False) + 1e-5)
-            X /= stdev
-
         X = X.reshape(-1, self.input_len) # Channel independence
 
 
-        t_index_stft = t_index_in[:, -1]
-        STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
-        STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
         A_scale = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
         if self.additive_scale:
+            t_index_stft = t_index_in[:, -1]
+            STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
+            STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
             A_half = A_scale + STFT_init.unsqueeze(1)
         else:
             A_half = A_scale 
@@ -159,9 +178,7 @@ class NeuralEvolutionarySpectra(nn.Module):
             # A_time = A_time.repeat(self.c_in, 1, 1, 1)
             A_time = A_time.permute(0, 2, 1, 3,4).reshape(-1, self.out_len, self.K, 2)
             A_half = A_half + A_time
-
         if self.tc_emb:
-
             time_e = self.time_emb(torch.concat([y_mark], dim=1)) # B, inp_len+out_len 128 B O TE
             tB, tT, _ = time_e.shape  # T = inp_len + out_len
             c_emb_expanded = self.c_emb.unsqueeze(0).unsqueeze(0)  # (1, 1, c, hidden_dim)
@@ -186,15 +203,108 @@ class NeuralEvolutionarySpectra(nn.Module):
         out_real.scatter_(dim=2, index=self.freq_indices.unsqueeze(0).unsqueeze(0).expand(B*self.c_in, self.out_len, -1), src=A_half.real)
         out_imag.scatter_(dim=2, index=self.freq_indices.unsqueeze(0).unsqueeze(0).expand(B*self.c_in, self.out_len, -1), src=A_half.imag)
         A_half_all = torch.complex(out_real, out_imag)
-
         A_all = construct_hermitian_spectrum(A_half_all, self.M)
-        all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, torch.arange(0, self.out_len).to(device))  # [B, input_len]
-        
-        
+
+        return A_all
+    
+    def forecast(self,X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+        """
+        Forward pass.
+
+        Args:
+            X: [B, input_len, N] — dummy input (for interface consistency; not used in computation)
+            t_index_in: [input_len] or [B, input_len], long
+            t_index_out: [out_len] or [B, out_len], long
+            x_mark: [B, T, TE], long
+
+        Returns:
+            out: [B, input_len + out_len], reconstructed + predicted signal
+            A_all_out: [B, input_len + out_len, M], full-spectrum amplitudes (complex)
+        """
+
+        if self.use_norm:
+            # Normalization from Non-stationary Transformer
+            means = X.mean(1, keepdim=True).detach()
+            X = X - means
+            stdev = torch.sqrt(torch.var(X, dim=1, keepdim=True, unbiased=False) + 1e-5)
+            X /= stdev
+        B = X.shape[0]
+        A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+        all_rec = synthesize_signal_on_subband(A_all, self.omegas, self.M, torch.arange(0, self.out_len).to(X.device))  # [B, input_len]
         all_rec = all_rec.reshape(B, self.c_in, -1)
         A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
         if self.use_norm:
-            all_rec = all_rec * stdev
-            all_rec = all_rec + means
+            all_rec = all_rec * stdev.permute(0, 2, 1)
+            all_rec = all_rec + means.permute(0, 2, 1)
 
         return all_rec, A_all 
+
+    def sample_from_A(self, A_all, N, B):
+        # Precompute phase: exp(i ω_k t_n) → [T, M]
+
+        W_K = self.sample_W(B, self.device, N) # [num_samples, B, M*c_in]
+        W_K = W_K.reshape(N, B*self.c_in, self.M)
+        A_expanded = A_all.unsqueeze(0) # [1, B*c_in, T, M]
+        phase_expanded = self.phase.unsqueeze(0).unsqueeze(0)  # [1, B*c_in, T, M]
+        W_expanded = W_K.unsqueeze(2)       # [num_samples, B*c_in, 1, M]
+        integrand = A_expanded * W_expanded  # [num_samples, B*c_in, T, M]
+        integrand = integrand  * phase_expanded  # [num_samples, B*c_in, T, M] 
+        X_complex = (1.0 / torch.sqrt(torch.tensor(self.M, dtype=torch.float32, device=self.device))) * \
+                    torch.sum(integrand, dim=-1)  # [num_samples, B*c_in, T]
+        X_real = X_complex.real  # [num_samples, B*c_in, T]
+        return X_real        
+
+
+    def prob_forecast(self,X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+        # output: 
+
+        # output: 
+        # all_rec: B, O, N, S
+        if self.use_norm:
+            # Normalization from Non-stationary Transformer
+            means = X.mean(1, keepdim=True).detach()
+            X = X - means
+            stdev = torch.sqrt(torch.var(X, dim=1, keepdim=True, unbiased=False) + 1e-5)
+            X /= stdev
+
+        # Full time grid
+        t_all = torch.arange(self.out_len, dtype=torch.float32, device=self.device)  # [T]
+
+        B =  X.shape[0]
+        # A_all = self.build_A1(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+        A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+
+
+        mini_iter = self.num_samples // self.mini_sample_num
+        mini_sample_list = []
+        for i in range(mini_iter):
+            mini_samples = self.sample_from_A(A_all, self.mini_sample_num, B)
+            mini_sample_list.append(mini_samples)
+        
+        samples = torch.concat(mini_sample_list, dim=0)
+        all_rec = samples
+        A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
+        all_rec = all_rec.reshape(self.num_samples, B, self.c_in, -1)
+        all_rec = all_rec.permute(1, 3,2, 0) # B T N S
+        # # Compute mean and variance over samples
+        # mean_pred = X_pred_samples.mean(dim=0)      # [B, H]
+        # var_pred = X_pred_samples.var(dim=0, unbiased=False)  # [B, H]
+        
+        if self.use_norm:
+            all_rec = all_rec * stdev.unsqueeze(-1)
+            all_rec = all_rec + means.unsqueeze(-1)
+
+        return all_rec, A_all
+
+
+
+
+
+    def forward(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+
+        t_index_in = t_index_in.squeeze(-1)
+        t_index_out = t_index_out.squeeze(-1)
+        if self.task == 'forecast':
+            return self.forecast(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+        elif self.task == 'prob_forecast':
+            return self.prob_forecast(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
