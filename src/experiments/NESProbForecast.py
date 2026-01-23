@@ -127,7 +127,7 @@ class NESProbForecast(ProbForecastExp, NESParameters):
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
         return preds.mean(dim=-1), batch_y
     
-    def _process_val_batch(self, batch_x, batch_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index):
+    def _process_val_batch(self, batch_x, batch_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index, return_A=False):
         # inputs:
         # batch_x: (B, T, N)
         # batch_y: (B, O, N)
@@ -145,6 +145,8 @@ class NESProbForecast(ProbForecastExp, NESParameters):
         batch_x = batch_x
         preds, A = self.model(batch_x, x_index, y_index, batch_x_date_enc, batch_y_date_enc) # [H]
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
+        if return_A:
+            return preds, batch_y, A
         return preds, batch_y
 
     def _test(self):

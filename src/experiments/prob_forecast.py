@@ -210,6 +210,8 @@ class ProbForecastExp(ForecastExp):
         
         embed = 'timeF'
         timeenc = 0 if embed != 'timeF' else 1
+        
+        self.timeenc = timeenc
 
         self.scaler = parse_type(self.scaler_type, globals=globals())()
         if self.dataset_type[0:3] == "ETT":
@@ -374,7 +376,7 @@ class ProbForecastExp(ForecastExp):
 
     def _load_best_model(self):
         self.model.load_state_dict(
-            torch.load(self.best_checkpoint_filepath, map_location=self.device)
+            torch.load(self.best_checkpoint_filepath, map_location=self.device), strict=False
         )
 
     def _run_print(self, *args, **kwargs):
@@ -387,15 +389,17 @@ class ProbForecastExp(ForecastExp):
         with open(os.path.join(self.run_save_dir, "output.log"), "a+") as f:
             print(time, *args, flush=True, file=f)
 
-    def _resume_run(self, seed):
+    def _resume_run(self, seed, load_optim=True):
         # only train loader rshould be checkedpoint to keep the validation and test consistency
         run_checkpoint_filepath = os.path.join(self.run_save_dir, f"run_checkpoint.pth")
         print(f"resuming from {run_checkpoint_filepath}")
 
         check_point = torch.load(run_checkpoint_filepath, map_location=self.device)
 
-        self.model.load_state_dict(check_point["model"])
-        self.model_optim.load_state_dict(check_point["optimizer"])
+        self.model.load_state_dict(check_point["model"], strict=False)
+        
+        if load_optim: self.model_optim.load_state_dict(check_point["optimizer"])
+        
         self.current_epoch = check_point["current_epoch"]
 
         self.early_stopper.set_state(check_point["early_stopping"])

@@ -207,7 +207,7 @@ class NESForecast(ForecastExp, NESParameters):
         timeenc = 0 if embed != 'timeF' else 1
         if self.dataset_type == 'Traffic':
             timeenc = 0
-
+        self.timeenc = timeenc
         self.scaler = parse_type(self.scaler_type, globals=globals())()
         if self.dataset_type[0:3] == "ETT":
             if self.dataset_type[0:4] == "ETTh":
@@ -329,7 +329,7 @@ class NESForecast(ForecastExp, NESParameters):
         full_dataset = MultiStepTimeFeatureSet(
             self.dataset,
             scaler=self.scaler,
-            time_enc=3,
+            time_enc=self.timeenc,
             window=self.windows,
             horizon=self.horizon,
             steps=self.pred_len,
@@ -384,7 +384,7 @@ class NESForecast(ForecastExp, NESParameters):
         # plt.savefig(os.path.join(self.run_save_dir, 'full.png'))
 
         # instance
-        if not self.columns or len(self.columns) >1:
+        if  self.dataset.num_features>1:
             last_n = 9
             n = min(all_batch_x.shape[2], 10)
             fig, axes = plt.subplots(n)

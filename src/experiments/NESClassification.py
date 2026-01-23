@@ -43,7 +43,7 @@ from src.models.NES import NeuralEvolutionarySpectra
 @dataclass
 class NESParameters:
     hidden_dim : int = 512
-    additive_scale : bool = True
+    additive_scale : bool = False
     use_norm : bool = False
     energy_ratio:float = 0.9
     pickout_zero_freq : bool = False
@@ -76,7 +76,6 @@ class NESClassification(UEAClassificationExp, NESParameters):
             t_emb=self.t_emb,
             additive_scale=self.additive_scale,
             use_norm=self.use_norm,
-            pickout_zero_freq=self.pickout_zero_freq,
             task='classification',
             out_prob=self.dataset.num_classes,
         )        
@@ -95,7 +94,6 @@ class NESClassification(UEAClassificationExp, NESParameters):
             selected_freqs = [torch.arange(0, self.windows//2 + 1)]
         else:
             selected_freqs = select_frequencies_by_energy_ratio_batch(energy_per_frame, self.energy_ratio)
-        print("selected_freqs:", selected_freqs)
         return selected_freqs
 
 
@@ -107,7 +105,7 @@ class NESClassification(UEAClassificationExp, NESParameters):
         # - pred: (B, N)/(B, O, N)
         # - label: (B, N)/(B, O, N)
 
-        outputs, rec, A = self.model(scaled_x, rec=True, return_A=True) # [H]
+        outputs, rec, A = self.model(scaled_x, None, None, None, None) # [H]
         return outputs, rec, A, y.long().squeeze(-1)
 
 
@@ -116,7 +114,7 @@ class NESClassification(UEAClassificationExp, NESParameters):
         batch_x = batch_x.to(self.device, dtype=torch.float32)
         batch_y = batch_y.to(self.device, dtype=torch.float32)
 
-        outputs = self.model(batch_x)  # torch.Size([batch_size, output_length, num_nodes])
+        outputs, rec, A = self.model(batch_x, None, None, None, None)  # torch.Size([batch_size, output_length, num_nodes])
 
         return outputs, batch_y.long().squeeze(-1)
 
