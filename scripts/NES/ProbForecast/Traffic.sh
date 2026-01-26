@@ -11,7 +11,7 @@ python3 ./src/experiments/NESProbForecast.py \
     --M=168 \
     --use_norm=True \
     --tc_emb=False \
-    --t_emb=False \
+    --t_emb=True \
     --energy_ratio=0.5 \
     --pred_len=192 \
     config_wandb ProbForecastBase \

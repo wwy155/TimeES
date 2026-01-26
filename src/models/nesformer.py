@@ -7,130 +7,9 @@ from torch_timeseries.nn.embedding import DataEmbedding_inverted
 from torch_timeseries.nn.encoder  import Encoder, EncoderLayer
 from torch_timeseries.nn.attention import FullAttention, AttentionLayer
 from torch_timeseries.nn.embedding import PatchEmbedding
+from src.nn.PatchTSTBackbone import PatchTSTEnc
+from src.nn.iTransformerBackbone import iTransformerEnc
 
-class FlattenHead(nn.Module):
-    def __init__(self, n_vars, nf, target_window, head_dropout=0):
-        super().__init__()
-        self.n_vars = n_vars
-        self.flatten = nn.Flatten(start_dim=-2)
-        self.linear = nn.Linear(nf, target_window)
-        self.dropout = nn.Dropout(head_dropout)
-
-    def forward(self, x):  # x: [bs x nvars x d_model x patch_num]
-        x = self.flatten(x)
-        x = self.linear(x)
-        x = self.dropout(x)
-        return x
-
-
-
-class PatchTSTEnc(nn.Module):
-    def __init__(self, seq_len, pred_len,  factor=1, enc_in=7, patch_len=16, n_heads=8, stride=8, d_ff=2048, activation='gelu', e_layers=2, d_model=512, dropout=0.0):
-        super(PatchTSTEnc, self).__init__()
-        self.seq_len = seq_len
-        self.pred_len = pred_len
-        padding = stride
-
-
-        # patching and embedding
-        self.patch_embedding = PatchEmbedding(
-            d_model, patch_len, stride, padding, dropout)
-        # Encoder
-        self.encoder = Encoder(
-            [
-                EncoderLayer(
-                    AttentionLayer(
-                        FullAttention(False, attention_dropout=dropout), d_model, n_heads),
-                    d_model,
-                    d_ff,
-                    dropout=dropout,
-                ) for l in range(e_layers)
-            ],
-            norm_layer=torch.nn.LayerNorm(d_model)
-        )
-
-        # Prediction Head
-        self.head_nf = d_model * \
-                       int((seq_len - patch_len) / stride + 2)
-        self.head = FlattenHead(enc_in, self.head_nf, pred_len,
-                                    head_dropout=dropout)
-
-    def forward(self, x_enc):
-        B, _, N = x_enc.shape # B L N
-        # B: batch_size;    E: d_model; 
-        # L: seq_len;       S: pred_len;
-        # N: number of variate (tokens), can also includes covariates
-        means = x_enc.mean(1, keepdim=True).detach()
-        x_enc = x_enc - means
-        stdev = torch.sqrt(
-            torch.var(x_enc, dim=1, keepdim=True, unbiased=False) + 1e-5)
-        x_enc /= stdev
-
-
-        # do patching and embedding
-        x_enc = x_enc.permute(0, 2, 1) # (B N T)
-        # u: [bs * nvars x patch_num x d_model]
-        enc_out, n_vars = self.patch_embedding(x_enc)
-
-        # Encoder
-        # z: [bs * nvars x patch_num x d_model]
-        enc_out, attns = self.encoder(enc_out)
-        # z: [bs x nvars x patch_num x d_model]
-        enc_out = torch.reshape(
-            enc_out, (-1, n_vars, enc_out.shape[-2], enc_out.shape[-1]))
-        # z: [bs x nvars x d_model x patch_num]
-        enc_out = enc_out.permute(0, 1, 3, 2)
-
-        # Decoder
-        dec_out = self.head(enc_out)  # z: [bs x nvars x target_window]
-
-        return dec_out.reshape(B*N, -1)
-
-
-
-
-class iTransformerEnc(nn.Module):
-    def __init__(self, seq_len, pred_len, enc_in=7, factor=1,n_heads=8, d_ff=2048, activation='gelu', e_layers=2, d_model=512, dropout=0.0):
-        super(iTransformerEnc, self).__init__()
-
-        self.enc_embedding = DataEmbedding_inverted(seq_len, d_model, None, None,
-                                                    dropout)
-        self.encoder = Encoder(
-            [
-                EncoderLayer(
-                    AttentionLayer(
-                        FullAttention(False, factor, attention_dropout=dropout,
-                                        output_attention=True), d_model, n_heads),
-                    d_model,
-                    d_ff,
-                    dropout=dropout,
-                    activation=activation
-                ) for l in range(e_layers)
-            ],
-            norm_layer=torch.nn.LayerNorm(d_model)
-        )
-        self.projector = nn.Linear(d_model, pred_len, bias=True)
-
-
-    def forward(self, x_enc):
-        B, _, N = x_enc.shape # B L N
-        # B: batch_size;    E: d_model; 
-        # L: seq_len;       S: pred_len;
-        # N: number of variate (tokens), can also includes covariates
-
-        # Embedding
-        # B L N -> B N E                (B L N -> B L E in the vanilla Transformer)
-        enc_out = self.enc_embedding(x_enc, None) # covariates (e.g timestamp) can be also embedded as tokens
-        
-        # B N E -> B N E                (B L E -> B L E in the vanilla Transformer)
-        # the dimensions of embedded time series has been inverted, and then processed by native attn, layernorm and ffn modules
-        enc_out, attns = self.encoder(enc_out, attn_mask=None)
-
-        # B N E -> B N S -> B S N 
-        dec_out = self.projector(enc_out)[:, :N, :] # filter the covariates
-
-
-        return dec_out.reshape(B*N, -1)
 
 
 class TemporalEmbedding(nn.Module):
@@ -179,6 +58,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         additive_scale=True,
         use_norm=True,
         pickout_zero_freq=True,
+        backbone='PatchTST'
     ):
         super().__init__()
         self.input_len = input_len
@@ -208,7 +88,10 @@ class NeuralEvolutionarySpectra(nn.Module):
         self.device = device
         self.pickout_zero_freq = pickout_zero_freq
         self.fft_len = self.M // 2 + 1
-        self.A_scale_predictor = PatchTSTEnc(input_len, 2 * (out_len) * self.K, enc_in=c_in)
+        if backbone =='PatchTST':
+            self.A_scale_predictor = PatchTSTEnc(input_len, 2 * (out_len) * self.K, enc_in=c_in)
+        elif backbone=='iTransformer':
+            self.A_scale_predictor = iTransformerEnc(input_len, 2 * (out_len) * self.K, enc_in=c_in)
         self.time_A_predictor = nn.Sequential(
             nn.Linear(512, hidden_dim),
             nn.ReLU(),

@@ -3,7 +3,7 @@ python3 ./src/experiments/NES.py \
     --dataset_type="SolarEnergy" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
-    --device="cuda:1" \
+    --device="cuda:3" \
     --hidden_dim=512 \
     --windows=96 \
     --patience=5 \
@@ -11,7 +11,7 @@ python3 ./src/experiments/NES.py \
     --M=96 \
     --use_norm=False \
     --tc_emb=False \
-    --t_emb=False \
+    --t_emb=True \
     --energy_ratio=0.9 \
     --pred_len=96 \
     config_wandb ForecastBase \
@@ -21,7 +21,7 @@ python3 ./src/experiments/NES.py \
     --dataset_type="SolarEnergy" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
-    --device="cuda:1" \
+    --device="cuda:3" \
     --hidden_dim=512 \
     --windows=96 \
     --patience=5 \
@@ -29,7 +29,7 @@ python3 ./src/experiments/NES.py \
     --M=96 \
     --use_norm=False \
     --tc_emb=False \
-    --t_emb=False \
+    --t_emb=True \
     --energy_ratio=0.9 \
     --pred_len=192 \
     config_wandb ForecastBase \
@@ -39,7 +39,7 @@ python3 ./src/experiments/NES.py \
     --dataset_type="SolarEnergy" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
-    --device="cuda:1" \
+    --device="cuda:3" \
     --hidden_dim=512 \
     --windows=96 \
     --patience=5 \
@@ -47,7 +47,7 @@ python3 ./src/experiments/NES.py \
     --M=96 \
     --use_norm=False \
     --tc_emb=False \
-    --t_emb=False \
+    --t_emb=True \
     --energy_ratio=0.9 \
     --pred_len=336 \
     config_wandb ForecastBase \
@@ -57,7 +57,7 @@ python3 ./src/experiments/NES.py \
     --dataset_type="SolarEnergy" \
     --batch_size=32 \
     --data_path="/data/yww/notebook/pytorchtimseries/data" \
-    --device="cuda:1" \
+    --device="cuda:3" \
     --hidden_dim=512 \
     --windows=96 \
     --patience=5 \
@@ -65,8 +65,10 @@ python3 ./src/experiments/NES.py \
     --M=96 \
     --use_norm=False \
     --tc_emb=False \
-    --t_emb=False \
+    --t_emb=True \
     --energy_ratio=0.9 \
     --pred_len=720 \
     config_wandb ForecastBase \
     runs  --seeds='[1,2,3,4,5]'
+
+

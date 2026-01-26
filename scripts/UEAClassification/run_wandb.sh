@@ -4,14 +4,13 @@
 device="cuda:0"
 runs="[1,2,3,4,5]"
 task="UEAClassification"
-
+# bash ./scripts/UEAClassification/run_wandb.sh
 # 可选：从命令行传入 device
 if [ $# -ge 1 ]; then
     device="$1"
 fi
-
 # 模型列表（可自定义）
-model_list=("DLinear" "Informer")
+model_list=("FreTS" "Informer")
 
 # 数据集列表（可包含重复，但通常不必要）
 dataset_type_list=(
@@ -29,6 +28,9 @@ dataset_type_list=(
     "SelfRegulationSCP2"
     "StandWalkJump"
     "UWaveGestureLibrary"
+    "Handwriting"
+    "Heartbeat"
+    "SpokenArabicDigits"
 )
 
 # 遍历所有组合
@@ -52,11 +54,15 @@ for model in "${model_list[@]}"; do
             "SelfRegulationSCP2")     series_length=1152 ;;
             "StandWalkJump")          series_length=2500 ;;
             "UWaveGestureLibrary")    series_length=315  ;;
+            "Handwriting")            series_length=152  ;;
+            "Heartbeat")              series_length=231  ;;
+            "SpokenArabicDigits")     series_length=93  ;;
             *)
                 echo "Error: Unknown dataset '$dataset'. Please add its series_length." >&2
                 exit 1
                 ;;
         esac
+# pytexp --model FreTS --task UEAClassification --dataset_type StandWalkJump --device cuda:0 runs "[1,2,3,4,5]
 
         # 构建并执行命令
         pytexp \
@@ -64,7 +70,6 @@ for model in "${model_list[@]}"; do
             --task "$task" \
             --dataset_type "$dataset" \
             --device="$device" \
-            --series_length "$series_length" \
             config_wandb ClassificationBase \
             runs "$runs"
     done

@@ -186,3 +186,30 @@ def synthesize_per_timestep_from_half(
     signal_real = torch.real(signal_complex) / math.sqrt(M)
 
     return signal_real
+
+
+def precompute_idft_synthesis_matrix(freq_indices, M, O, device):
+    """
+    freq_indices: tensor of shape [K], values in [0, M//2]
+    Returns W: complex tensor [K, M]
+    """
+    K = freq_indices.shape[0]
+    n = torch.arange(O, device=device).float()  # [O]
+    k = freq_indices.float().unsqueeze(1)       # [K, 1]
+    
+    # Phase: exp(j * 2π * k * n / M)
+    phase = 2 * torch.pi * k * n / M
+    W = torch.cos(phase) + 1j * torch.sin(phase)  # [K, O]
+    
+    # Apply scaling for real signal reconstruction
+    scale = torch.ones_like(freq_indices, dtype=torch.float32)
+    if M % 2 == 0:
+        # Even M: Nyquist bin is M//2
+        nyq_mask = (freq_indices == M // 2)
+        scale[nyq_mask] = 1.0
+    # DC bin (k=0) also scale=1
+    non_dc_nyq = (freq_indices != 0) & (freq_indices != M // 2)
+    scale[non_dc_nyq] = 2.0
+    
+    W = (W * scale.unsqueeze(1) ).permute(1, 0) # [O, K]
+    return W

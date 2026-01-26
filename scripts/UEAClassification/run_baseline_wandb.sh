@@ -1,4 +1,5 @@
 #!/bin/bash
+export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
 
 # 固定参数
 task="UEAClassification"
@@ -6,7 +7,8 @@ runs="[1,2,3,4,5]"
 
 # 默认 device
 device="cuda:0"
-
+#  bash ./scripts/UEAClassification/run_baseline_wandb.sh "cuda:1" "FITS"
+#  bash ./scripts/UEAClassification/run_baseline_wandb.sh "cuda:2" "FreTS"
 # 默认模型列表（可被命令行覆盖）
 default_models=("DLinear")
 # 默认数据集列表：全部 14 个 UEA 数据集

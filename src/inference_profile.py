@@ -3,7 +3,7 @@ import sys
 import torch
 import time
 import numpy as np
-sys.path.insert(0,os.path.abspath('/data/yww/notebook/3108Dif'))
+# sys.path.insert(0,os.path.abspath('/data/yww/notebook/3902_nes'))
 # sys.path.insert(0,os.path.abspath('/notebooks/pytorchtimseries'))
 from tqdm.notebook import tqdm
 from torch_timeseries.dataset import *
@@ -123,7 +123,7 @@ def baseline_profile(model_type, dataset_type, windows, pred_len, device='cuda:2
     return max(memories), min(memories), t/i*1000, np.std(ts), nparam
 
 
-def profile_nes():
+def profile_nes(model_type, dataset_type, windows, pred_len, device='cuda:2'):
     import matplotlib.pyplot as plt
     import numpy as np
 
@@ -141,12 +141,10 @@ def profile_nes():
     from src.experiments.NESProbForecast import NESProbForecast
 
     from torch_timeseries.utils.model_stats import count_parameters
-    exp = NESProbForecast(batch_size=1, dataset_type=dataset_type, windows=windows, pred_len=pred_len, data_path='/data/yww/notebook/pytorchtimseries', device=device)
+    exp = NESProbForecast(batch_size=1, energy_ratio=0.9, dataset_type=dataset_type, windows=windows, pred_len=pred_len, data_path='/data/yww/notebook/pytorchtimseries', device=device)
     exp._setup_run(1000)
 
     memories = []
-    
-    from torch_timeseries.utils.model_stats import count_parameters
     _, nparam = count_parameters(exp.model)
     torch.cuda.empty_cache()
     steps = 20
@@ -164,6 +162,8 @@ def profile_nes():
         origin_y,
         batch_x_date_enc,
         batch_y_date_enc,
+        x_index, 
+        y_index
     ) in enumerate(self.train_loader):
         if i >= steps:
             break
@@ -174,17 +174,16 @@ def profile_nes():
         batch_y = batch_y.to(self.device).float()
         batch_x_date_enc = batch_x_date_enc.to(self.device).float()
         batch_y_date_enc = batch_y_date_enc.to(self.device).float()
+        x_index = x_index.to(self.device)
+        y_index = y_index.to(self.device)
         torch.cuda.reset_peak_memory_stats()
         start_memory = torch.cuda.memory_allocated()
         start = time.time()
-        if model_type in set([ "TimeDiff", "DiffusionTS", "TMDM", "NsDiff"]):
-                loss = self._process_val_batch(
-                    batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
-                )
-        elif model_type in set(['TimeGrad', 'CSDI']):
-            pred, true = self._process_val_batch(
-                batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
-            )
+
+        self._process_val_batch(
+            batch_x, batch_y, batch_x_date_enc, batch_y_date_enc, x_index, y_index
+        )
+
         ts.append(time.time() - start)
         t += time.time() - start
         end_memory = torch.cuda.max_memory_allocated()
@@ -289,7 +288,9 @@ def profile_main_all():
             if d =="ILI":
                 w = 168
                 p = 36
-            mem, minme, tim, tstd, nparam = baseline_profile(m, d, w, p)
+            # mem, minme, tim, tstd, nparam = baseline_profile(m, d, w, p)
+            mem, minme, tim, tstd, nparam = profile_nes(m, d, w, p)
+            
             all_data.append(( m, d,mem, minme, tim, tstd, nparam))
         # df = pd.DataFrame(all_data, columns=["model", "dataset", "peak_memory", "min_memory", "time", "timestd", "parameters"])
         # df.to_csv('inference_profile.csv')
