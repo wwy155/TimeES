@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ETTh2" \
     --batch_size=32 \

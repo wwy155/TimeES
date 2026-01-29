@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ETTh1" \
     --batch_size=32 \
@@ -14,5 +14,4 @@ python3 ./src/experiments/TimeES.py \
     --t_emb=False \
     --energy_ratio=1 \
     --pred_len=192 \
-    config_wandb ProbForecastBase \
     runs  --seeds='[1,2,3,4,5]'

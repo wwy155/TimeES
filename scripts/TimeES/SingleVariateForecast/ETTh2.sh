@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ETTh2" \
     --batch_size=32 \
@@ -15,7 +15,6 @@ python3 ./src/experiments/TimeES.py \
     --t_emb=False \
     --energy_ratio=0.9 \
     --pred_len=96 \
-    config_wandb ForecastBaseSG \
     runs  --seeds='[1,2,3,4,5]'
 
 

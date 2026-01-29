@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ExchangeRate" \
     --batch_size=32 \
@@ -17,7 +17,7 @@ python3 ./src/experiments/TimeES.py \
     --pred_len=96 \
     runs  --seeds='[1,2,3,4,5]'
 
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ExchangeRate" \
     --batch_size=32 \
@@ -36,7 +36,7 @@ python3 ./src/experiments/TimeES.py \
     --pred_len=192 \
     runs  --seeds='[1,2]'
 
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ExchangeRate" \
     --batch_size=32 \
@@ -55,7 +55,7 @@ python3 ./src/experiments/TimeES.py \
     --pred_len=336 \
     runs  --seeds='[1,2]'
 
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ExchangeRate" \
     --batch_size=32 \

@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="Traffic" \
     --batch_size=1 \
@@ -18,7 +18,7 @@ python3 ./src/experiments/TimeES.py \
     runs  --seeds='[1,2,3,4,5]'
 
 
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 python3 ./src/experiments/TimeES.py \
     --dataset_type="Traffic" \
     --batch_size=1 \

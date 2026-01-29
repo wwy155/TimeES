@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 # bash ./scripts/TimeES/SG/PatchTST/SolarEnergy.sh
 python3 ./src/experiments/TimeES.py \
     --dataset_type="SolarEnergy" \

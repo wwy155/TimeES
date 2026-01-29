@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 # bash ./scripts/TimeES/SG/PatchTST/ETTh1.sh
 python3 ./src/experiments/TimeES.py \
     --dataset_type="ETTh1" \

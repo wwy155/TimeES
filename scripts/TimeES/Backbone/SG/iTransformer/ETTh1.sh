@@ -1,4 +1,4 @@
-export PYTHONPATH=./:/data/yww/notebook/pytorchtimseries
+export PYTHONPATH=./
 # bash ./scripts/TimeES/Backbone/iTransformer/ETTh1.sh
 # bash ./scripts/TimeES/Backbone/PatchTST/ETTh1.sh
 # bash ./scripts/TimeES/Backbone/PatchTST/ExchangeRate.sh
