@@ -1,33 +1,9 @@
 import torch
 import torch.nn as nn
-from src.utils.evolutionary_spectra import construct_hermitian_spectrum, synthesize_signal_on_subband#, precompute_idft_synthesis_matrix
-
-
-def precompute_idft_synthesis_matrix(freq_indices, M, device):
-    """
-    freq_indices: tensor of shape [K], values in [0, M//2]
-    Returns W: complex tensor [K, M]
-    """
-    K = freq_indices.shape[0]
-    n = torch.arange(M, device=device).float()  # [O]
-    k = freq_indices.float().unsqueeze(1)       # [K, 1]
-    
-    # Phase: exp(j * 2π * k * n / M)
-    phase = 2 * torch.pi * k * n / M
-    W = torch.cos(phase) + 1j * torch.sin(phase)  # [K, O]
-    
-    # Apply scaling for real signal reconstruction
-    scale = torch.ones_like(freq_indices, dtype=torch.float32)
-    if M % 2 == 0:
-        # Even M: Nyquist bin is M//2
-        nyq_mask = (freq_indices == M // 2)
-        scale[nyq_mask] = 1.0
-    # DC bin (k=0) also scale=1
-    non_dc_nyq = (freq_indices != 0) & (freq_indices != M // 2)
-    scale[non_dc_nyq] = 2.0
-    
-    W = 1/M*(W * scale.unsqueeze(1) ).permute(1, 0) # [O, K]
-    return W
+from src.utils.evolutionary_spectra import construct_hermitian_spectrum, synthesize_signal_on_subband, precompute_idft_synthesis_matrix
+from src.nn.PatchTSTBackbone import PatchTSTEnc
+from src.nn.iTransformerBackbone import iTransformerEnc
+import math
 
 class TemporalEmbedding(nn.Module):
     def __init__(self, d_model, embed_type='fixed', freq='h'):
@@ -59,7 +35,7 @@ class TemporalEmbedding(nn.Module):
         return hour_x + weekday_x + day_x + month_x + minute_x
 
 
-class NeuralEvolutionarySpectra(nn.Module):
+class TimeES(nn.Module):
     def __init__(
         self,
         input_len,
@@ -68,17 +44,18 @@ class NeuralEvolutionarySpectra(nn.Module):
         device,
         omegas,
         M,
-        A_init,
         selected_freqs,
         hidden_dim=512,
         t_emb=None,
         tc_emb=False,
-        additive_scale=True,
         use_norm=True,
-        layer_nums=2,
-        fast_build=False,
+        fast_build=True,
+        backbone='linear',
         task='forecast',
         out_prob=0,
+        num_samples=100,
+        mini_sample_num=1,
+        # layer_nums=2,
     ):
         super().__init__()
         self.input_len = input_len
@@ -97,12 +74,10 @@ class NeuralEvolutionarySpectra(nn.Module):
         self.omegas =  omegas.to(device).float() #torch.fft.fftfreq(input_len).to(device)
         self.freq_indices = all_selected
         self.K = len(all_selected)
-        if fast_build:
-            self.F = precompute_idft_synthesis_matrix(self.freq_indices, self.M, device)
+        self.F = precompute_idft_synthesis_matrix(self.freq_indices, self.M, self.out_len, device)
         
         self.selected_omegas = self.omegas[self.freq_indices]
         self.t_emb = t_emb
-        self.A_init = A_init # T, N, M
         if t_emb:
             self.time_emb = TemporalEmbedding(512, 'timeF', 'h')
             # self.w_embd = nn.Parameter(torch.randn(self.K, 256))
@@ -131,24 +106,27 @@ class NeuralEvolutionarySpectra(nn.Module):
 
         self.device = device
         self.fft_len = self.M // 2 + 1
-        self.A_scale_predictor = nn.Sequential(
-            nn.Linear(input_len, hidden_dim),
-            nn.ReLU(),
-            *[nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU()) for _ in range(layer_nums - 1)],
-            nn.Linear(hidden_dim, 2 * out_len * self.K)
-        )
 
-        self.additive_scale = additive_scale
+        if backbone =='PatchTST':
+            self.A_scale_predictor = PatchTSTEnc(input_len, 2 * (out_len) * self.K, enc_in=c_in)
+        elif backbone=='iTransformer':
+            self.A_scale_predictor = iTransformerEnc(input_len, 2 * (out_len) * self.K, enc_in=c_in)
+        else:
+            self.A_scale_predictor = nn.Sequential(
+                nn.Linear(input_len, hidden_dim),
+                nn.ReLU(),
+                *[nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU()) for _ in range(2 - 1)],
+                nn.Linear(hidden_dim, 2 * out_len * self.K)
+            )
 
 
         if self.task == 'prob_forecast' or  self.task == 'prob_rec':
-            self.num_samples = 100
-            self.mini_sample_num = 1
-
-            self.W_mu_real = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)      # [M]
-            self.W_mu_imag = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)      # [M]
-            self.W_logvar_real = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)  # log(σ²)
-            self.W_logvar_imag = nn.Parameter(torch.zeros(self.M*self.c_in), requires_grad=True)
+            self.num_samples = num_samples
+            self.mini_sample_num = mini_sample_num
+            self.W_mu_real = nn.Parameter(torch.zeros(self.K*self.c_in), requires_grad=True)      # [M]
+            self.W_mu_imag = nn.Parameter(torch.zeros(self.K*self.c_in), requires_grad=True)      # [M]
+            self.W_logvar_real = nn.Parameter(torch.zeros(self.K*self.c_in), requires_grad=True)  # log(σ²)
+            self.W_logvar_imag = nn.Parameter(torch.zeros(self.K*self.c_in), requires_grad=True)
 
             self.t_all = torch.arange(self.out_len, dtype=torch.float32, device=self.device)  # [T]
             self.phase = torch.exp(1j * torch.outer(self.t_all, self.omegas))  # [T, M]
@@ -159,10 +137,10 @@ class NeuralEvolutionarySpectra(nn.Module):
 
     def sample_W(self, B, device, num_samples):
         """
-        Sample W: [num_samples, B, M] (complex)
+        Sample W: [num_samples, B, K] (complex)
         Using reparameterization: W = μ + ε * σ, ε ~ N(0,1)
         """
-        # Expand to [num_samples, B, M]
+        # Expand to [num_samples, B, K]
         mu_r = self.W_mu_real.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
         mu_i = self.W_mu_imag.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
         logvar_r = self.W_logvar_real.unsqueeze(0).unsqueeze(0).expand(num_samples, B, -1)
@@ -174,49 +152,18 @@ class NeuralEvolutionarySpectra(nn.Module):
         eps_r = torch.randn_like(std_r, device=device)
         eps_i = torch.randn_like(std_i, device=device)
 
-        W_real = mu_r + eps_r * std_r  # [num_samples, B, M*c_in]
-        W_imag = mu_i + eps_i * std_i  # [num_samples, B, M*c_in]
+        W_real = mu_r + eps_r * std_r  # [num_samples, B, K*c_in]
+        W_imag = mu_i + eps_i * std_i  # [num_samples, B, K*c_in]
 
-        return torch.complex(W_real, W_imag)  # [num_samples, B, M*c_in]
+        return torch.complex(W_real, W_imag)  # [num_samples, B, K*c_in]
+    
     def build_A_half(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
         B = X.shape[0]
         device = X.device
-        raw_X = X
         X = X.permute(0, 2, 1)
-        
-        X = X.reshape(-1, self.input_len) # Channel independence
+        # X = X.reshape(-1, self.input_len) # Channel independence
 
-
-        A_scale = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
-        if self.additive_scale:
-            t_index_stft = t_index_in[:, -1]
-            # import pdb;pdb.set_trace
-            STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
-            STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
-            A_half = A_scale + STFT_init.unsqueeze(1)
-        else:
-            A_half = A_scale 
-        return A_half  # B*C, K, 2
-
-    def fast_build_X(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
-        B = X.shape[0]
-        device = X.device
-        raw_X = X
-        X = X.permute(0, 2, 1)
-        
-        X = X.reshape(-1, self.input_len) # Channel independence
-
-
-        A_scale = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
-        if self.additive_scale:
-            t_index_stft = t_index_in[:, -1]
-            # import pdb;pdb.set_trace
-            STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
-            STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
-            A_half = A_scale + STFT_init.unsqueeze(1)
-        else:
-            A_half = A_scale 
-
+        A_half = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
         if self.t_emb:
             # time_e = self.time_emb(torch.concat([x_mark, y_mark], dim=1)) # B, inp_len+out_len 128 B T TE
             time_e = self.time_emb(torch.concat([y_mark], dim=1)) # B, inp_len+out_len 128 B T TE*c_in
@@ -243,8 +190,28 @@ class NeuralEvolutionarySpectra(nn.Module):
             A_time = A_time.view(tB, tT, self.c_in, self.K, 2).permute(0, 2, 1, 3, 4)
             A_time = A_time.reshape(-1,tT, self.K, 2)
             A_half = A_half + A_time
-        X = torch.einsum('bok,km->bom', torch.view_as_complex(A_half), self.F).real  # [B*c_in, out_len, M]
+        return A_half #   (B*N, T, 2*K)
+
+    def fast_build_X(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+        A_half = self.build_A_half(X, t_index_in, t_index_out, x_mark, y_mark)
+        A_half = A_half[:, :, 0:1, :].repeat(1, 1, self.K, 1)
+        # X = self.M/self.K*torch.einsum('bok,ko->bok', torch.view_as_complex(A_half), self.F).real  # [B*c_in, out_len, M]
+        A_F = math.sqrt(1/self.K) * torch.view_as_complex(A_half) * self.F.unsqueeze(0) # b, o, K
+        X = A_F.sum(-1).real # B, O
         return X, A_half
+
+
+    def fast_generate_X(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
+        B = X.shape[0]
+        device = X.device
+        A_half = self.build_A_half(X, t_index_in, t_index_out, x_mark, y_mark)
+        A_half = A_half[:, :, 0:1, :].repeat(1, 1, self.K, 1)
+        W_K = self.sample_W(B, self.device, self.num_samples) # [num_samples, B, K*c_in]
+        W_K = W_K.reshape(self.num_samples, B*self.c_in, self.K) 
+        A_F = math.sqrt(1/self.K) * torch.view_as_complex(A_half) * self.F.unsqueeze(0) # b, o, K
+        X = (W_K.unsqueeze(2) * A_F.unsqueeze(0)).sum(-1).real #  # [num_samples, B, O]
+        return X, A_half
+
 
 
 
@@ -254,19 +221,10 @@ class NeuralEvolutionarySpectra(nn.Module):
         device = X.device
         raw_X = X
         X = X.permute(0, 2, 1)
-        
         X = X.reshape(-1, self.input_len) # Channel independence
 
 
-        A_scale = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
-        if self.additive_scale:
-            t_index_stft = t_index_in[:, -1]
-            # import pdb;pdb.set_trace
-            STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
-            STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
-            A_half = A_scale + STFT_init.unsqueeze(1)
-        else:
-            A_half = A_scale 
+        A_half = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
 
         if self.t_emb:
             # time_e = self.time_emb(torch.concat([x_mark, y_mark], dim=1)) # B, inp_len+out_len 128 B T TE
@@ -343,7 +301,6 @@ class NeuralEvolutionarySpectra(nn.Module):
         if self.use_norm:
             all_rec = all_rec * stdev.permute(0, 2, 1)
             all_rec = all_rec + means.permute(0, 2, 1)
-
         return all_rec, A_all 
 
 
@@ -400,17 +357,21 @@ class NeuralEvolutionarySpectra(nn.Module):
 
         B =  X.shape[0]
         # A_all = self.build_A1(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
-        A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
-
-        mini_iter = self.num_samples // self.mini_sample_num
-        mini_sample_list = []
-        for i in range(mini_iter):
-            mini_samples = self.sample_from_A(A_all, self.mini_sample_num, B)
-            mini_sample_list.append(mini_samples)
-        
-        samples = torch.concat(mini_sample_list, dim=0)
-        all_rec = samples
-        A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
+        if self.fast_build:
+            all_rec, A_half = self.fast_generate_X(X, t_index_in, t_index_out, x_mark, y_mark)
+            A = A_half
+        else:
+            A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+            mini_iter = self.num_samples // self.mini_sample_num
+            mini_sample_list = []
+            for i in range(mini_iter):
+                mini_samples = self.sample_from_A(A_all, self.mini_sample_num, B)
+                mini_sample_list.append(mini_samples)
+            
+            samples = torch.concat(mini_sample_list, dim=0)
+            all_rec = samples
+            A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
+            A = A_all
         all_rec = all_rec.reshape(self.num_samples, B, self.c_in, -1)
         all_rec = all_rec.permute(1, 3,2, 0) # B T N S
         # # Compute mean and variance over samples
@@ -420,7 +381,7 @@ class NeuralEvolutionarySpectra(nn.Module):
         if self.use_norm:
             all_rec = all_rec * stdev.unsqueeze(-1)
             all_rec = all_rec + means.unsqueeze(-1)
-        return all_rec, A_all
+        return all_rec, A
 
 
 
@@ -524,63 +485,3 @@ class NeuralEvolutionarySpectra(nn.Module):
             return self.classification(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
    # return self.prob_rec(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
 
-
-
-
-
-    def build_A_t(self, X, t_index_in, t_index_out, x_mark=None, y_mark=None):
-        B = X.shape[0]
-        device = X.device
-        raw_X = X
-        X = X.permute(0, 2, 1)
-        
-        X = X.reshape(-1, self.input_len) # Channel independence
-
-
-        A_scale = self.A_scale_predictor(torch.concat([X], dim=-1)).view(-1, self.out_len, self.K, 2)
-        if self.additive_scale:
-            t_index_stft = t_index_in[:, -1]
-            STFT_init_complex = self.A_init[:, t_index_stft.to('cpu'), :][:, :,  self.freq_indices.to('cpu')].permute(1, 0, 2).reshape(B*self.c_in, -1).to(self.device) # B, N, M//2 + 1 clofat
-            STFT_init = torch.view_as_real(STFT_init_complex) # B, N, M//2 + 1, 2
-            A_half = A_scale + STFT_init.unsqueeze(1)
-        else:
-            A_half = A_scale 
-
-        if self.t_emb:
-            # time_e = self.time_emb(torch.concat([x_mark, y_mark], dim=1)) # B, inp_len+out_len 128 B T TE
-            time_e = self.time_emb(torch.concat([y_mark], dim=1)) # B, inp_len+out_len 128 B T TE*c_in
-            tB, _, _ = time_e.shape  # T = inp_len + out_len
-
-            # time_w = self.w_embd.unsqueeze(0).unsqueeze(0).expand(B, self.out_len, -1) # B, T, WE
-            A_time = self.time_A_predictor(torch.concat([time_e], dim=-1)).view(tB, self.out_len,  self.c_in, self.K, 2) # B, O, C, K, 2
-            # A_time = A_time.repeat(self.c_in, 1, 1, 1)
-            A_time = A_time.permute(0, 2, 1, 3,4).reshape(-1, self.out_len, self.K, 2)
-            A_half = A_half + A_time
-        if self.tc_emb:
-            time_e = self.time_emb(torch.concat([y_mark], dim=1)) # B, inp_len+out_len 128 B O TE
-            tB, tT, _ = time_e.shape  # T = inp_len + out_len
-            c_emb_expanded = self.c_emb.unsqueeze(0).unsqueeze(0)  # (1, 1, c, hidden_dim)
-            c_emb_expanded = c_emb_expanded.expand(tB, tT, -1, -1)   # (B, T, c, hidden_dim)
-
-            time_e = self.time_emb(y_mark)  # B, T, hidden_dim)
-            time_e = time_e.unsqueeze(2).expand(-1, -1, self.c_in, -1)  # (B, T, c, hidden_dim)
-
-            combined = torch.cat([time_e, c_emb_expanded], dim=-1)  # (B, T, c, 2*hidden_dim)
-
-            A_time = self.time_A_predictor(combined)  #  (B, T, c, 2*K)
-
-            A_time = A_time.view(tB, tT, self.c_in, self.K, 2).permute(0, 2, 1, 3, 4)
-            A_time = A_time.reshape(-1,tT, self.K, 2)
-            A_half = A_half + A_time
-
-
-        A_half = torch.view_as_complex(A_half)
-
-        out_real = torch.zeros(B*self.c_in, self.out_len, self.fft_len, device=A_half.device, dtype=A_half.real.dtype)
-        out_imag = torch.zeros(B*self.c_in, self.out_len, self.fft_len, device=A_half.device, dtype=A_half.imag.dtype)
-        out_real.scatter_(dim=2, index=self.freq_indices.unsqueeze(0).unsqueeze(0).expand(B*self.c_in, self.out_len, -1), src=A_half.real)
-        out_imag.scatter_(dim=2, index=self.freq_indices.unsqueeze(0).unsqueeze(0).expand(B*self.c_in, self.out_len, -1), src=A_half.imag)
-        A_half_all = torch.complex(out_real, out_imag)
-        A_all = construct_hermitian_spectrum(A_half_all, self.M)
-
-        return A_all

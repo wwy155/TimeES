@@ -396,31 +396,34 @@ class TimeES(nn.Module):
             stdev = torch.sqrt(torch.var(X, dim=1, keepdim=True, unbiased=False) + 1e-5)
             X /= stdev
 
-        # Full time grid
-        t_all = torch.arange(self.out_len, dtype=torch.float32, device=self.device)  # [T]
+        all_rec, A_half = self.fast_generate_X(X, t_index_in, t_index_out, x_mark, y_mark)
 
-        B =  X.shape[0]
-        # A_all = self.build_A1(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
-        A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
-        
-        omega_expanded = self.omegas.unsqueeze(0).unsqueeze(0)   # [1, 1, 96]
-        t_expanded = t_index_in.unsqueeze(-1)//self.M                    # [32, 384, 1]
-        phase = omega_expanded * t_expanded   # or torch.mul(omega_expanded, t_expanded)
 
-        mini_iter = self.num_samples // self.mini_sample_num
-        mini_sample_list = []
-        for i in range(mini_iter):
-            mini_samples = self.sample_from_A_t(A_all, self.mini_sample_num, B, phase)
-            mini_sample_list.append(mini_samples)
+        # # Full time grid
+        # t_all = torch.arange(self.out_len, dtype=torch.float32, device=self.device)  # [T]
+
+        # B =  X.shape[0]
+        # # A_all = self.build_A1(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
+        # A_all = self.build_A(X, t_index_in, t_index_out, x_mark=x_mark, y_mark=y_mark)
         
-        samples = torch.concat(mini_sample_list, dim=0)
-        all_rec = samples
-        A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
-        all_rec = all_rec.reshape(self.num_samples, B, self.c_in, -1)
-        all_rec = all_rec.permute(1, 3,2, 0) # B T N S
-        # # Compute mean and variance over samples
-        # mean_pred = X_pred_samples.mean(dim=0)      # [B, H]
-        # var_pred = X_pred_samples.var(dim=0, unbiased=False)  # [B, H]
+        # omega_expanded = self.omegas.unsqueeze(0).unsqueeze(0)   # [1, 1, 96]
+        # t_expanded = t_index_in.unsqueeze(-1)//self.M                    # [32, 384, 1]
+        # phase = omega_expanded * t_expanded   # or torch.mul(omega_expanded, t_expanded)
+
+        # mini_iter = self.num_samples // self.mini_sample_num
+        # mini_sample_list = []
+        # for i in range(mini_iter):
+        #     mini_samples = self.sample_from_A_t(A_all, self.mini_sample_num, B, phase)
+        #     mini_sample_list.append(mini_samples)
+        
+        # samples = torch.concat(mini_sample_list, dim=0)
+        # all_rec = samples
+        # A_all = A_all.reshape(B, self.c_in, A_all.shape[-2], A_all.shape[-1] )
+        # all_rec = all_rec.reshape(self.num_samples, B, self.c_in, -1)
+        # all_rec = all_rec.permute(1, 3,2, 0) # B T N S
+        # # # Compute mean and variance over samples
+        # # mean_pred = X_pred_samples.mean(dim=0)      # [B, H]
+        # # var_pred = X_pred_samples.var(dim=0, unbiased=False)  # [B, H]
         
         if self.use_norm:
             all_rec = all_rec * stdev.unsqueeze(-1)

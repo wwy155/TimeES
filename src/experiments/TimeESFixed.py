@@ -37,7 +37,7 @@ from src.experiments.forecast import ForecastExp
 from src.utils.pesudo_spectrum import get_initial_spectrum_benowitz, get_initial_spectrum_benowitz_targetM
 from src.utils.pesudo_amplitude import get_initial_amplitude_right_onesided_mv, get_initial_amplitude_stft_torch
 from src.utils.evolutionary_spectra import select_frequencies_by_energy_ratio, select_frequencies_by_energy_ratio_batch
-from src.models.TimeES import TimeES
+from src.models.TimeESFixedA import TimeES
 
 @dataclass
 class Parameters:
@@ -52,7 +52,7 @@ class Parameters:
 
 @dataclass
 class TimeESForecast(ForecastExp, Parameters):
-    model_type: str = "TimeES2"
+    model_type: str = "TimeESFixedA"
 
     def _init_model(self):
         scaled_data = self.scaler.transform(self.dataset.data)
@@ -153,7 +153,7 @@ class TimeESForecast(ForecastExp, Parameters):
         results = results.permute(0, 2, 1)
         # out_true = torch.concat([batch_x, batch_y], dim=1).reshape(-1)
         if return_A:
-            return results[:, -self.pred_len:, :], batch_y, A[:, :, :, :]
+            return results[:, -self.pred_len:, :], batch_y, A[:, -1, :, :]
         return results[:, -self.pred_len:, :], batch_y
 
 
