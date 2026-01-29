@@ -1,1 +1,0 @@
-bash ./scripts/NESForecast6/run_mv_wandb_t.sh cuda:1 ETTh1 ETTh2 ETTm1  SolarEnergy Electricity  

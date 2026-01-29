@@ -1,1 +1,0 @@
-bash ./scripts/NESForecast2/run_mv_wandb.sh cuda:3 ETTh1 ETTh2 ETTm1 ETTm2 ExchangeRate Weather  

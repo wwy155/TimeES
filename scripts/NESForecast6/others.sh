@@ -1,1 +1,0 @@
-bash ./scripts/NESForecast6/run_mv_wandb_t.sh cuda:2  ETTm1 ETTh1 Traffic SolarEnergy Electricity Weather

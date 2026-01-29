@@ -1,1 +1,0 @@
-bash ./scripts/NESForecast4/run_mv_wandb.sh cuda:2  Traffic
