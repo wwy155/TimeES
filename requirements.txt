@@ -1,4 +1,4 @@
-torch_timeseries==0.1.10
+torch_timeseries==0.1.23
 gluonts
 pytorchts
 CRPS
