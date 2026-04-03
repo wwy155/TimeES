@@ -12,6 +12,24 @@ from src.datasets import *
 from torch_timeseries.utils.model_stats import count_parameters
 import pandas as pd
 
+from src.experiments.KNF import KNFForecast
+from src.experiments.Koopa import KoopaForecast
+from src.experiments.SKOLR import SKOLRForecast
+from src.experiments.TimeBridge import TimeBridgeForecast
+from src.experiments.TimeMixer import TimeMixerForecast
+from src.experiments.TimeXer import TimeXerForecast
+
+# ForecastExp subclasses in this repo: use _process_one_batch (not _process_val_batch); omit num_samples.
+_NODESPEC_FORECAST_REGISTRY = {
+    "KNF": KNFForecast,
+    "Koopa": KoopaForecast,
+    "SKOLR": SKOLRForecast,
+    "TimeBridge": TimeBridgeForecast,
+    "TimeMixer": TimeMixerForecast,
+    "TimeXer": TimeXerForecast,
+}
+NODESPEC_FORECAST_MODELS = frozenset(_NODESPEC_FORECAST_REGISTRY.keys())
+
 # from src.experiments.iTransformer import iTransformerExp
 # exp = DLinearForecast(data_path='/notebooks/4901_revisit_cdtran/data', save_dir='/notebooks/4901_revisit_cdtran/results', device='cuda:0')
 # exp = DLinearForecast(dataset_type="ExchangeRate", data_path='/notebooks/pytorchtimseries/data', save_dir='/notebooks/pytorchtimseries/results', device='cuda:0')
@@ -68,7 +86,20 @@ import pandas as pd
 #     return "PAN", dataset_type, max(memories), min(memories), t/i*1000, nparam
 
 def baseline_profile(model_type, dataset_type, windows, pred_len, device='cuda:2'):
-    exp = eval(f"{model_type}Forecast", globals())(num_samples=1, batch_size=1, dataset_type=dataset_type, windows=windows, pred_len=pred_len, data_path='/data/yww/notebook/pytorchtimseries', device=device)
+    data_path = "/data/yww/notebook/pytorchtimseries/data"
+    kwargs = dict(
+        batch_size=1,
+        dataset_type=dataset_type,
+        windows=windows,
+        pred_len=pred_len,
+        data_path=data_path,
+        device=device,
+    )
+    if model_type in _NODESPEC_FORECAST_REGISTRY:
+        exp = _NODESPEC_FORECAST_REGISTRY[model_type](**kwargs)
+    else:
+        kwargs["num_samples"] = 1
+        exp = eval(f"{model_type}Forecast", globals())(**kwargs)
     exp._setup_run(1000)
     memories = []
     
@@ -110,6 +141,15 @@ def baseline_profile(model_type, dataset_type, windows, pred_len, device='cuda:2
         elif model_type in set(['TimeGrad', 'CSDI']):
             pred, true = self._process_val_batch(
                 batch_x, batch_y, batch_x_date_enc, batch_y_date_enc
+            )
+        elif model_type in NODESPEC_FORECAST_MODELS:
+            pred, true = self._process_one_batch(
+                batch_x,
+                batch_y,
+                origin_x,
+                origin_y,
+                batch_x_date_enc,
+                batch_y_date_enc,
             )
         ts.append(time.time() - start)
         t += time.time() - start
@@ -272,35 +312,38 @@ def all_profile(model_type, dataset_type, windows, pred_len):
 
     
 def profile_main_all():
+    # Nodespec ForecastExp models (KNF, Koopa, SKOLR, TimeBridge, TimeMixer, TimeXer):
+      models = ["KNF", "Koopa", "SKOLR", "TimeBridge", "TimeMixer", "TimeXer"]
+      for m in models:
+          mem, minme, tim, tstd, nparam = baseline_profile(m, 'ETTh2', 96, 720, device="cuda:2")
     # models = ["CSDI", "TimeDiff", "DiffusionTS", "NsDiff", "TMDM"]
-    models = [ "CSDI", "TimeDiff", "DiffusionTS", "NsDiff", "TMDM"]
-    # models = ["TMDM"]
-    # models = ["TimeGrad"]
-    # datasets = ["Traffic","ETTh1","ETTh2","ETTm1","ETTm2","ILI","Electricity","ExchangeRate","Weather"]
-    # datasets = ["Traffic","ETTh1","ETTh2","ETTm1","ETTm2","Electricity","ExchangeRate","Weather"]
-    # datasets = ["ETTh1","ETTh2","ETTm1","ETTm2","ExchangeRate","Weather"]
-    datasets = ["ETTh1"]
-    all_data = []
-    for m in models:
-        for d in datasets:
-            w = 168
-            p = 192
-            if d =="ILI":
-                w = 168
-                p = 36
-            # mem, minme, tim, tstd, nparam = baseline_profile(m, d, w, p)
-            mem, minme, tim, tstd, nparam = profile_nes(m, d, w, p)
+    # models = [ "CSDI", "TimeDiff", "DiffusionTS", "NsDiff", "TMDM"]
+    # # models = ["TMDM"]
+    # # models = ["TimeGrad"]
+    # # datasets = ["Traffic","ETTh1","ETTh2","ETTm1","ETTm2","ILI","Electricity","ExchangeRate","Weather"]
+    # # datasets = ["Traffic","ETTh1","ETTh2","ETTm1","ETTm2","Electricity","ExchangeRate","Weather"]
+    # # datasets = ["ETTh1","ETTh2","ETTm1","ETTm2","ExchangeRate","Weather"]
+    # datasets = ["ETTh1"]
+    # all_data = []
+    # for m in models:
+    #     for d in datasets:
+    #         w = 168
+    #         p = 192
+    #         if d =="ILI":
+    #             w = 168
+    #             p = 36
+    #         # mem, minme, tim, tstd, nparam = baseline_profile(m, d, w, p)
+    #         mem, minme, tim, tstd, nparam = profile_nes(m, d, w, p)
             
-            all_data.append(( m, d,mem, minme, tim, tstd, nparam))
-        # df = pd.DataFrame(all_data, columns=["model", "dataset", "peak_memory", "min_memory", "time", "timestd", "parameters"])
-        # df.to_csv('inference_profile.csv')
-    print(all_data)
-    df = pd.DataFrame(all_data, columns=["model", "dataset", "peak_memory", "min_memory", "time", "timestd", "parameters"])
-    df.to_csv('inference_profile.csv')
+    #         all_data.append(( m, d,mem, minme, tim, tstd, nparam))
+    #     # df = pd.DataFrame(all_data, columns=["model", "dataset", "peak_memory", "min_memory", "time", "timestd", "parameters"])
+    #     # df.to_csv('inference_profile.csv')
+    # print(all_data)
+    # df = pd.DataFrame(all_data, columns=["model", "dataset", "peak_memory", "min_memory", "time", "timestd", "parameters"])
+    # df.to_csv('inference_profile.csv')
 
 
 if __name__ == "__main__":
-    from src.experiments import *
     profile_main_all()
 # from torch_timeseries.experiments import *
 # profile_pan_windows()

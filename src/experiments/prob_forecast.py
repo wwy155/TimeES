@@ -100,7 +100,6 @@ class ProbForecastExp(ForecastExp):
                     pred = self.scaler.inverse_transform(pred)
                     true = origin_y
                 loss = self.loss_func(pred, true)
-                loss.backward()
 
                 torch.nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.max_grad_norm
